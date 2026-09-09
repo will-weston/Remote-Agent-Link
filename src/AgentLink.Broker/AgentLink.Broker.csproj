@@ -1,0 +1,67 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <UseWinUI>true</UseWinUI>
+    <EnableMsixTooling>false</EnableMsixTooling>
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <WindowsAppSdkBootstrapInitialize>false</WindowsAppSdkBootstrapInitialize>
+    <WindowsAppSdkDeploymentManagerInitialize>false</WindowsAppSdkDeploymentManagerInitialize>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <PlatformTarget>x64</PlatformTarget>
+    <Platforms>x64</Platforms>
+    <PublishSingleFile>false</PublishSingleFile>
+    <PublishTrimmed>false</PublishTrimmed>
+    <CsWinRTAotOptimizerEnabled>false</CsWinRTAotOptimizerEnabled>
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <BrokerBrandingDirectory>$(MSBuildProjectDirectory)\..\..\artifacts\branding</BrokerBrandingDirectory>
+    <ApplicationIcon>$(BrokerBrandingDirectory)\AgentLink.ico</ApplicationIcon>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK.WinUI" Version="2.3.6" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.Runtime" Version="2.4.0" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.InteractiveExperiences" Version="2.1.6" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.6584" />
+    <PackageReference Include="Microsoft.Windows.CsWinRT" Version="2.3.1" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="$(BrokerBrandingDirectory)\AgentLink.ico" Link="Assets\AgentLink.ico"
+             CopyToOutputDirectory="Always" CopyToPublishDirectory="Always" />
+    <Content Include="$(BrokerBrandingDirectory)\Logo44.png" Link="Assets\Logo44.png"
+             CopyToOutputDirectory="Always" CopyToPublishDirectory="Always" />
+  </ItemGroup>
+  <Target Name="GenerateBrokerBranding" BeforeTargets="PrepareForBuild"
+          Condition="'$(DesignTimeBuild)' != 'true'"
+          Inputs="$(MSBuildProjectDirectory)\..\..\scripts\generate-assets.ps1"
+          Outputs="$(BrokerBrandingDirectory)\AgentLink.ico;$(BrokerBrandingDirectory)\Logo44.png;$(BrokerBrandingDirectory)\Logo50.png;$(BrokerBrandingDirectory)\Logo150.png;$(BrokerBrandingDirectory)\Logo256.png">
+    <Exec Command="pwsh -NoProfile -File &quot;$(MSBuildProjectDirectory)\..\..\scripts\generate-assets.ps1&quot;"
+          WorkingDirectory="$(MSBuildProjectDirectory)" />
+  </Target>
+  <ItemGroup>
+    <ProjectReference Include="..\AgentLink.Core\AgentLink.Core.csproj" />
+    <ProjectReference Include="..\AgentLink.Desktop\AgentLink.Desktop.csproj" />
+    <ProjectReference Include="..\AgentLink.Copilot\AgentLink.Copilot.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="Exists('..\..\artifacts\native\$(Configuration)\AgentLink.Transport.dll')">
+    <Content Include="..\..\artifacts\native\$(Configuration)\AgentLink.Transport.dll"
+             Link="AgentLink.Transport.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+  <Target Name="PublishBrokerXamlResources" AfterTargets="ComputeFilesToPublish">
+    <Error Condition="!Exists('$(TargetDir)$(TargetName).pri')"
+           Text="Build the WinUI broker before publishing; its compiled resource index is missing." />
+    <ItemGroup>
+      <_BrokerXamlRuntime Include="$(TargetDir)**\*.xbf" />
+      <ResolvedFileToPublish Include="@(_BrokerXamlRuntime)"
+                             RelativePath="%(_BrokerXamlRuntime.RecursiveDir)%(_BrokerXamlRuntime.Filename)%(_BrokerXamlRuntime.Extension)"
+                             CopyToPublishDirectory="PreserveNewest" />
+      <ResolvedFileToPublish Include="$(TargetDir)$(TargetName).pri"
+                             RelativePath="$(TargetName).pri" CopyToPublishDirectory="PreserveNewest" />
+    </ItemGroup>
+  </Target>
+</Project>

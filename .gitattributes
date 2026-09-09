@@ -1,0 +1,22 @@
+* text=auto eol=lf
+
+*.sln text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Preserve the supplied third-party legal text rather than reformatting it.
+licenses/** -whitespace
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.gif binary
+*.zip binary
+*.msix binary
+*.msixbundle binary
+*.cer binary
+*.pfx binary
+*.dll binary
+*.exe binary
+*.pdb binary

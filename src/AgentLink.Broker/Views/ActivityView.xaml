@@ -1,0 +1,62 @@
+<UserControl
+    x:Class="AgentLink.Broker.Views.ActivityView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="using:AgentLink.Broker.ViewModels">
+    <ScrollViewer HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Spacing="20" Style="{StaticResource PageStackStyle}">
+            <TextBlock Text="Activity" Style="{StaticResource TitleTextBlockStyle}" TextWrapping="Wrap" />
+            <TextBlock Text="Tasks and results on this device. You can request cancellation here even when the remote desktop is disconnected."
+                       Style="{StaticResource BodyText}" />
+            <StackPanel Spacing="12">
+                <CheckBox IsChecked="{x:Bind Model.ActiveOnly, Mode=TwoWay}">
+                    <TextBlock Text="Show active tasks only" TextWrapping="Wrap" />
+                </CheckBox>
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Button Content="Refresh" Click="RefreshClicked" />
+                    <Button Content="Newest" Click="NewestClicked" />
+                    <Button Content="Older" Click="OlderClicked" IsEnabled="{x:Bind Model.HasOlder, Mode=OneWay}" />
+                </StackPanel>
+            </StackPanel>
+            <Border Style="{StaticResource CardStyle}" Visibility="{x:Bind Model.IsEmpty, Mode=OneWay}">
+                <StackPanel Spacing="16" Padding="8,24" HorizontalAlignment="Center" MaxWidth="420">
+                    <FontIcon Glyph="&#xE9D9;" FontSize="40" />
+                    <TextBlock Text="No tasks to show" Style="{StaticResource SubtitleTextBlockStyle}" TextAlignment="Center" TextWrapping="Wrap" />
+                    <TextBlock Text="Approved agent tasks and saved results appear here. Check the active-only filter if you expected completed work." Style="{StaticResource BodyText}" TextAlignment="Center" />
+                </StackPanel>
+            </Border>
+            <ListView ItemsSource="{x:Bind Model.Tasks}" SelectedItem="{x:Bind Model.Selected, Mode=TwoWay}" SelectionChanged="SelectionChanged"
+                      Visibility="{x:Bind Model.HasTasks, Mode=OneWay}"
+                      MaxHeight="420" MinHeight="80" SelectionMode="Single" HorizontalContentAlignment="Stretch"
+                      AutomationProperties.Name="Tasks on this device">
+                <ListView.ItemTemplate>
+                    <DataTemplate x:DataType="vm:TaskItem">
+                        <StackPanel Spacing="4" Padding="4,8">
+                            <TextBlock Text="{x:Bind State}" Style="{StaticResource BodyStrongTextBlockStyle}" TextWrapping="Wrap" />
+                            <TextBlock Text="{x:Bind Workspace}" TextWrapping="Wrap" />
+                            <TextBlock Text="{x:Bind TaskId}" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                            <TextBlock Text="{x:Bind Created}" Style="{StaticResource BodyText}" />
+                        </StackPanel>
+                    </DataTemplate>
+                </ListView.ItemTemplate>
+            </ListView>
+            <Button Click="CancelClicked" IsEnabled="{x:Bind Model.CanCancel, Mode=OneWay}" Visibility="{x:Bind Model.HasTasks, Mode=OneWay}">
+                <TextBlock Text="Cancel selected task" TextWrapping="Wrap" />
+            </Button>
+            <TextBlock Text="{x:Bind Model.Status, Mode=OneWay}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+            <Border Style="{StaticResource CardStyle}" Visibility="{x:Bind Model.HasTasks, Mode=OneWay}">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="Task details" Style="{StaticResource SubtitleTextBlockStyle}" TextWrapping="Wrap" />
+                    <TextBox Text="{x:Bind Model.Details, Mode=OneWay}" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap"
+                             MaxHeight="560" MinHeight="140" ScrollViewer.VerticalScrollBarVisibility="Auto"
+                             AutomationProperties.Name="Selected task details, prompt and result" />
+                </StackPanel>
+            </Border>
+            <Expander Header="Connection diagnostics" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                <TextBox Text="{x:Bind Shell.ActivityLog, Mode=OneWay}" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap"
+                         MaxHeight="360" MinHeight="100" ScrollViewer.VerticalScrollBarVisibility="Auto"
+                         AutomationProperties.Name="Broker connection log" />
+            </Expander>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

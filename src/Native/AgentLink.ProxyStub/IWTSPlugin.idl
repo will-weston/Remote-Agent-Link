@@ -1,0 +1,59 @@
+// Necessary public COM contracts from Microsoft's MIT-licensed
+// SampleOutOfProcRdpPlugin. See THIRD-PARTY-NOTICES.txt.
+import "oaidl.idl";
+import "ocidl.idl";
+
+declare_guid(CLSID_AgentLinkProxyStub, 586B220F-6970-4E64-B5DD-438A298A876A);
+
+interface IWTSPlugin;
+interface IWTSListener;
+interface IWTSListenerCallback;
+interface IWTSVirtualChannelCallback;
+interface IWTSVirtualChannelManager;
+interface IWTSVirtualChannel;
+
+[object, uuid(a1230201-1439-4e62-a414-190d0ac3d40e)]
+interface IWTSPlugin : IUnknown {
+    HRESULT Initialize([in] IWTSVirtualChannelManager* pChannelMgr);
+    HRESULT Connected();
+    HRESULT Disconnected(DWORD dwDisconnectCode);
+    HRESULT Terminated();
+};
+
+[object, uuid(a1230206-9a39-4d58-8674-cdb4dff4e73b)]
+interface IWTSListener : IUnknown {
+    HRESULT GetConfiguration([out] IPropertyBag** ppPropertyBag);
+};
+
+[object, uuid(a1230203-d6a7-11d8-b9fd-000bdbd1f198)]
+interface IWTSListenerCallback : IUnknown {
+    HRESULT OnNewChannelConnection(
+        [in] IWTSVirtualChannel* pChannel,
+        [in, ptr] BSTR data,
+        [out] BOOL* pbAccept,
+        [out] IWTSVirtualChannelCallback** ppCallback);
+};
+
+[object, uuid(a1230204-d6a7-11d8-b9fd-000bdbd1f198)]
+interface IWTSVirtualChannelCallback : IUnknown {
+    HRESULT OnDataReceived([in] ULONG cbSize, [in, size_is(cbSize)] BYTE* pBuffer);
+    HRESULT OnClose();
+};
+
+[object, uuid(a1230205-d6a7-11d8-b9fd-000bdbd1f198)]
+interface IWTSVirtualChannelManager : IUnknown {
+    HRESULT CreateListener([in, string] const char* pszChannelName, [in] ULONG uFlags,
+        [in] IWTSListenerCallback* pListenerCallback, [out] IWTSListener** ppListener);
+};
+
+[object, uuid(a1230207-d6a7-11d8-b9fd-000bdbd1f198)]
+interface IWTSVirtualChannel : IUnknown {
+    HRESULT Write([in] ULONG cbSize, [in, size_is(cbSize)] BYTE* pBuffer, [in] IUnknown* pReserved);
+    HRESULT Close();
+};
+
+[object, uuid(C0C62619-3BC1-4095-9B9A-84503E37DAA5)]
+interface IWTSPluginFactory : IUnknown {
+    HRESULT GetPluginCount([out, retval] long* count);
+    HRESULT CreatePlugin([in] long index, [out, retval] IWTSPlugin** plugin);
+};

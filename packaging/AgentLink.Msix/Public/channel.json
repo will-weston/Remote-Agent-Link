@@ -1,0 +1,5 @@
+{
+  "channel": "RALink.v1",
+  "protocolVersion": "1",
+  "description": "Remote Agent Link raw duplex transport; paired mutual TLS is required."
+}

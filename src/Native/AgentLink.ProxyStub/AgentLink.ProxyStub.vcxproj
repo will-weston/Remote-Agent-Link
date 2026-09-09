@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64"><Configuration>Debug</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{39B452A4-990B-4D35-A4DC-2DC15792077D}</ProjectGuid>
+    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <PlatformToolset>v145</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <Import Project="..\Native.props" />
+  <ItemDefinitionGroup>
+    <Midl>
+      <TargetEnvironment>X64</TargetEnvironment>
+      <DefaultCharType>Signed</DefaultCharType>
+      <OutputDirectory>$(IntDir)</OutputDirectory>
+      <HeaderFileName>IWTSPlugin_h.h</HeaderFileName>
+      <InterfaceIdentifierFileName>IWTSPlugin_i.c</InterfaceIdentifierFileName>
+      <ProxyFileName>IWTSPlugin_p.c</ProxyFileName>
+      <DllDataFileName>dlldata.c</DllDataFileName>
+      <GenerateTypeLibrary>false</GenerateTypeLibrary>
+      <ValidateAllParameters>true</ValidateAllParameters>
+    </Midl>
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(IntDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <ForcedIncludeFiles>$(ProjectDir)ProxyIdentity.h;%(ForcedIncludeFiles)</ForcedIncludeFiles>
+      <CompileAs>CompileAsC</CompileAs>
+      <WarningLevel>Level3</WarningLevel>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <Link>
+      <ModuleDefinitionFile>AgentLink.ProxyStub.def</ModuleDefinitionFile>
+      <AdditionalDependencies>rpcrt4.lib;rpcns4.lib;oleaut32.lib;uuid.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup><Midl Include="IWTSPlugin.idl" /></ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="$(IntDir)dlldata.c" />
+    <ClCompile Include="$(IntDir)IWTSPlugin_i.c" />
+    <ClCompile Include="$(IntDir)IWTSPlugin_p.c" />
+  </ItemGroup>
+  <ItemGroup><None Include="AgentLink.ProxyStub.def" /><None Include="THIRD-PARTY-NOTICES.txt" /></ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

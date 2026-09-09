@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <UseWindowsForms>true</UseWindowsForms>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\AgentLink.Core\AgentLink.Core.csproj" />
+    <ProjectReference Include="Worker\AgentLink.Desktop.Worker.csproj" ReferenceOutputAssembly="false" GlobalPropertiesToRemove="RuntimeIdentifier;SelfContained;PublishSingleFile" />
+    <Compile Remove="Worker\**\*.cs" />
+    <InternalsVisibleTo Include="Desktop.Tests" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="Worker\bin\$(Configuration)\$(TargetFramework)\AgentLink.Desktop.Worker.exe" Link="DesktopWorker\AgentLink.Desktop.Worker.exe" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="Worker\bin\$(Configuration)\$(TargetFramework)\AgentLink.Desktop.Worker.dll" Link="DesktopWorker\AgentLink.Desktop.Worker.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="Worker\bin\$(Configuration)\$(TargetFramework)\AgentLink.Desktop.Worker.deps.json" Link="DesktopWorker\AgentLink.Desktop.Worker.deps.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="Worker\bin\$(Configuration)\$(TargetFramework)\AgentLink.Desktop.Worker.runtimeconfig.json" Link="DesktopWorker\AgentLink.Desktop.Worker.runtimeconfig.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="Worker\bin\$(Configuration)\$(TargetFramework)\AgentLink.Core.dll" Link="DesktopWorker\AgentLink.Core.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

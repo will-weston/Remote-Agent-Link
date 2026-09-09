@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+         xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+         xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
+         xmlns:uap5="http://schemas.microsoft.com/appx/manifest/uap/windows10/5"
+         xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+         xmlns:desktop4="http://schemas.microsoft.com/appx/manifest/desktop/windows10/4"
+         xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
+         xmlns:virtualization="http://schemas.microsoft.com/appx/manifest/virtualization/windows10"
+         xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+         IgnorableNamespaces="uap uap3 uap5 desktop desktop4 com virtualization rescap">
+  <Identity Name="RemoteAgentLink" Publisher="CN=Remote Agent Link Development"
+            Version="0.4.0.1" ProcessorArchitecture="x64" />
+  <Properties>
+    <DisplayName>Remote Agent Link</DisplayName>
+    <PublisherDisplayName>Remote Agent Link contributors</PublisherDisplayName>
+    <Logo>Assets\Logo50.png</Logo>
+    <virtualization:RegistryWriteVirtualization>
+      <virtualization:ExcludedKeys>
+        <virtualization:ExcludedKey>HKEY_CURRENT_USER\Software\Microsoft\Terminal Server Client\Default\AddIns\RemoteAgentLink</virtualization:ExcludedKey>
+      </virtualization:ExcludedKeys>
+    </virtualization:RegistryWriteVirtualization>
+  </Properties>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+  <Resources><Resource Language="en-us" /></Resources>
+  <Applications>
+    <Application Id="Broker" Executable="Broker\AgentLink.Broker.exe" EntryPoint="Windows.FullTrustApplication" desktop4:SupportsMultipleInstances="true">
+      <uap:VisualElements DisplayName="Remote Agent Link" Description="Pairing, human control, and remote agent broker"
+                          BackgroundColor="transparent" Square150x150Logo="Assets\Logo150.png" Square44x44Logo="Assets\Logo44.png" />
+      <Extensions>
+        <uap5:Extension Category="windows.appExecutionAlias">
+          <uap5:AppExecutionAlias desktop4:Subsystem="windows">
+            <uap5:ExecutionAlias Alias="ralink-broker.exe" />
+          </uap5:AppExecutionAlias>
+        </uap5:Extension>
+        <desktop:Extension Category="windows.startupTask" Executable="Broker\AgentLink.Broker.exe" EntryPoint="Windows.FullTrustApplication">
+          <desktop:StartupTask TaskId="RemoteAgentLinkBroker" Enabled="false" DisplayName="Remote Agent Link broker" />
+        </desktop:Extension>
+      </Extensions>
+    </Application>
+    <Application Id="Mcp" Executable="Mcp\AgentLink.Mcp.exe" EntryPoint="Windows.FullTrustApplication" desktop4:SupportsMultipleInstances="true">
+      <uap:VisualElements AppListEntry="none" DisplayName="Remote Agent Link MCP" Description="Connection-bound stdio MCP server"
+                          BackgroundColor="transparent" Square150x150Logo="Assets\Logo150.png" Square44x44Logo="Assets\Logo44.png" />
+      <Extensions>
+        <uap5:Extension Category="windows.appExecutionAlias">
+          <uap5:AppExecutionAlias desktop4:Subsystem="console">
+            <uap5:ExecutionAlias Alias="ralink-mcp.exe" />
+          </uap5:AppExecutionAlias>
+        </uap5:Extension>
+      </Extensions>
+    </Application>
+    <Application Id="RdpPlugin" Executable="Native\AgentLink.RdpPlugin.exe" EntryPoint="Windows.FullTrustApplication" desktop4:SupportsMultipleInstances="true">
+      <uap:VisualElements AppListEntry="none" DisplayName="Remote Agent Link RDP plugin" Description="Out-of-process RDP dynamic channel factory"
+                          BackgroundColor="transparent" Square150x150Logo="Assets\Logo150.png" Square44x44Logo="Assets\Logo44.png" />
+      <Extensions>
+        <com:Extension Category="windows.comServer">
+          <com:ComServer>
+            <com:ExeServer Executable="Native\AgentLink.RdpPlugin.exe" DisplayName="Remote Agent Link RDP factory">
+              <com:Class Id="583E23E9-3A9F-461C-A3CA-6F99F2625B78" DisplayName="Remote Agent Link plugin factory" />
+              <com:Class Id="77A190C4-C7EB-4DB2-A317-9CFADA8F2A53" DisplayName="Remote Agent Link legacy plugin" />
+            </com:ExeServer>
+          </com:ComServer>
+        </com:Extension>
+        <uap3:Extension Category="windows.appExtension">
+          <uap3:AppExtension Name="com.microsoft.rdp.plugin.wtsplugin" Id="RemoteAgentLink"
+                             DisplayName="Remote Agent Link" Description="Paired remote agent transport" PublicFolder="Public">
+            <uap3:Properties>
+              <ComServer>583E23E9-3A9F-461C-A3CA-6F99F2625B78</ComServer>
+              <InitializationDvcName>RALink.v1</InitializationDvcName>
+            </uap3:Properties>
+          </uap3:AppExtension>
+        </uap3:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+  <Extensions>
+    <com:Extension Category="windows.comInterface">
+      <com:ComInterface>
+        <com:ProxyStub Id="586B220F-6970-4E64-B5DD-438A298A876A" DisplayName="Remote Agent Link RDP proxy"
+                       Path="Native\AgentLink.ProxyStub.dll" />
+        <com:Interface Id="C0C62619-3BC1-4095-9B9A-84503E37DAA5" ProxyStubClsid="586B220F-6970-4E64-B5DD-438A298A876A" />
+        <com:Interface Id="A1230201-1439-4E62-A414-190D0AC3D40E" ProxyStubClsid="586B220F-6970-4E64-B5DD-438A298A876A" />
+        <com:Interface Id="A1230206-9A39-4D58-8674-CDB4DFF4E73B" ProxyStubClsid="586B220F-6970-4E64-B5DD-438A298A876A" />
+        <com:Interface Id="A1230203-D6A7-11D8-B9FD-000BDBD1F198" ProxyStubClsid="586B220F-6970-4E64-B5DD-438A298A876A" />
+        <com:Interface Id="A1230204-D6A7-11D8-B9FD-000BDBD1F198" ProxyStubClsid="586B220F-6970-4E64-B5DD-438A298A876A" />
+        <com:Interface Id="A1230205-D6A7-11D8-B9FD-000BDBD1F198" ProxyStubClsid="586B220F-6970-4E64-B5DD-438A298A876A" />
+        <com:Interface Id="A1230207-D6A7-11D8-B9FD-000BDBD1F198" ProxyStubClsid="586B220F-6970-4E64-B5DD-438A298A876A" />
+      </com:ComInterface>
+    </com:Extension>
+  </Extensions>
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+    <rescap:Capability Name="unvirtualizedResources" />
+  </Capabilities>
+</Package>

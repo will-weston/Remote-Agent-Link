@@ -1,0 +1,6 @@
+LIBRARY "AgentLink.Transport.dll"
+EXPORTS
+    RAL_Open
+    RAL_Read
+    RAL_Write
+    RAL_Close

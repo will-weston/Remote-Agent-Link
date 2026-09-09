@@ -1,0 +1,77 @@
+<Window
+    x:Class="AgentLink.Broker.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid x:Name="Root">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+        <TitleBar x:Name="WindowTitleBar" Title="Remote Agent Link" />
+        <NavigationView x:Name="Navigation" Grid.Row="1" PaneDisplayMode="Left" IsPaneOpen="True"
+                        IsPaneToggleButtonVisible="False" IsBackButtonVisible="Collapsed"
+                        IsSettingsVisible="False" SelectionChanged="NavigationChanged" ItemInvoked="NavigationInvoked" AlwaysShowHeader="False"
+                        OpenPaneLength="88" CompactPaneLength="88" CompactModeThresholdWidth="0" ExpandedModeThresholdWidth="0">
+            <NavigationView.Resources>
+                <Thickness x:Key="NavigationViewItemContentPresenterMargin">0</Thickness>
+            </NavigationView.Resources>
+            <NavigationView.MenuItems>
+                <NavigationViewItem x:Name="ConnectionsNavigation" Style="{StaticResource RailItemStyle}" AutomationProperties.Name="Home">
+                    <StackPanel Spacing="6" HorizontalAlignment="Center">
+                        <FontIcon Glyph="&#xE80F;" FontSize="22" />
+                        <TextBlock Text="Home" FontSize="12" HorizontalAlignment="Center" TextWrapping="Wrap" TextAlignment="Center" />
+                    </StackPanel>
+                </NavigationViewItem>
+                <NavigationViewItem x:Name="AgentsNavigation" Style="{StaticResource RailItemStyle}" AutomationProperties.Name="Agents">
+                    <StackPanel Spacing="6" HorizontalAlignment="Center">
+                        <FontIcon Glyph="&#xE8F2;" FontSize="22" />
+                        <TextBlock Text="Agents" FontSize="12" HorizontalAlignment="Center" TextWrapping="Wrap" TextAlignment="Center" />
+                    </StackPanel>
+                </NavigationViewItem>
+                <NavigationViewItem x:Name="ActivityNavigation" Style="{StaticResource RailItemStyle}" AutomationProperties.Name="Activity">
+                    <StackPanel Spacing="6" HorizontalAlignment="Center">
+                        <FontIcon Glyph="&#xE9D9;" FontSize="22" />
+                        <TextBlock Text="Activity" FontSize="12" HorizontalAlignment="Center" TextWrapping="Wrap" TextAlignment="Center" />
+                    </StackPanel>
+                </NavigationViewItem>
+            </NavigationView.MenuItems>
+            <NavigationView.FooterMenuItems>
+                <NavigationViewItem x:Name="SettingsNavigation" Style="{StaticResource RailItemStyle}" AutomationProperties.Name="Settings">
+                    <StackPanel Spacing="6" HorizontalAlignment="Center">
+                        <FontIcon Glyph="&#xE713;" FontSize="22" />
+                        <TextBlock Text="Settings" FontSize="12" HorizontalAlignment="Center" TextWrapping="Wrap" TextAlignment="Center" />
+                    </StackPanel>
+                </NavigationViewItem>
+                <NavigationViewItem x:Name="QuitNavigation" Style="{StaticResource RailItemStyle}" SelectsOnInvoked="False" AutomationProperties.Name="Quit Remote Agent Link">
+                    <StackPanel Spacing="6" HorizontalAlignment="Center">
+                        <FontIcon Glyph="&#xE7E8;" FontSize="20" />
+                        <TextBlock Text="Quit" FontSize="12" HorizontalAlignment="Center" TextWrapping="Wrap" TextAlignment="Center" />
+                    </StackPanel>
+                </NavigationViewItem>
+            </NavigationView.FooterMenuItems>
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <StackPanel Spacing="8" Margin="12,0,20,0">
+                    <ScrollViewer MaxHeight="220" HorizontalScrollBarVisibility="Disabled">
+                        <StackPanel Spacing="8">
+                            <InfoBar IsOpen="{x:Bind Model.HasNotice, Mode=OneWay}" Message="{x:Bind Model.Notice, Mode=OneWay}"
+                                     Severity="Informational" IsClosable="True" Closed="NoticeClosed" />
+                            <InfoBar IsOpen="{x:Bind Model.HasApproval, Mode=OneWay}" Title="Your approval is needed"
+                                     Message="An agent is waiting. Review the identity, capability and scope before deciding."
+                                     Severity="Warning" IsClosable="False" AutomationProperties.LiveSetting="Assertive">
+                                <InfoBar.ActionButton>
+                                    <Button Click="ReviewClicked"><TextBlock Text="Review request" TextWrapping="Wrap" /></Button>
+                                </InfoBar.ActionButton>
+                            </InfoBar>
+                        </StackPanel>
+                    </ScrollViewer>
+                    <ProgressBar IsIndeterminate="True" Visibility="{x:Bind Model.IsBusy, Mode=OneWay}" AutomationProperties.Name="Stopping the broker" />
+                </StackPanel>
+                <ContentControl x:Name="PageContent" Grid.Row="1" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" />
+            </Grid>
+        </NavigationView>
+    </Grid>
+</Window>

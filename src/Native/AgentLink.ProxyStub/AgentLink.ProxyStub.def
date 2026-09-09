@@ -1,0 +1,5 @@
+LIBRARY "AgentLink.ProxyStub.dll"
+EXPORTS
+    DllCanUnloadNow PRIVATE
+    DllGetClassObject PRIVATE
+    GetProxyDllInfo

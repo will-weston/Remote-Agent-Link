@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType></PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\AgentLink.Copilot\AgentLink.Copilot.csproj" />
+    <Compile Include="..\..\src\AgentLink.Broker\ViewModels\ObservableModel.cs" Link="Models\ObservableModel.cs" />
+    <Compile Include="..\..\src\AgentLink.Broker\ViewModels\ShellLifetime.cs" Link="Models\ShellLifetime.cs" />
+    <Compile Include="..\..\src\AgentLink.Broker\ViewModels\ShellViewModel.cs" Link="Models\ShellViewModel.cs" />
+    <Compile Include="..\..\src\AgentLink.Broker\ViewModels\PeerViewModel.cs" Link="Models\PeerViewModel.cs" />
+    <Compile Include="..\..\src\AgentLink.Broker\ViewModels\McpConfiguration.cs" Link="Models\McpConfiguration.cs" />
+    <Compile Include="..\..\src\AgentLink.Broker\ViewModels\McpSetup.cs" Link="Models\McpSetup.cs" />
+    <Compile Include="..\..\src\AgentLink.Broker\ViewModels\SettingsViewModel.cs" Link="Models\SettingsViewModel.cs" />
+    <Compile Include="..\..\src\AgentLink.Broker\Shell\PluginLoadingSettings.cs" Link="Models\PluginLoadingSettings.cs" />
+    <Compile Include="..\..\src\AgentLink.Broker\Shell\WindowActivation.cs" Link="Models\WindowActivation.cs" />
+    <Compile Include="..\..\src\AgentLink.Broker\Shell\NativeWindow.cs" Link="Models\NativeWindow.cs" />
+    <Compile Include="..\..\src\AgentLink.Broker\Shell\UiStartupDiagnostics.cs" Link="Models\UiStartupDiagnostics.cs" />
+    <Compile Include="..\..\src\AgentLink.Broker\ViewModels\ActivityViewModel.cs" Link="Models\ActivityViewModel.cs" />
+    <Compile Include="..\..\src\AgentLink.Broker\PeerConnectionSnapshot.cs" Link="Models\PeerConnectionSnapshot.cs" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,76 @@
+Remote Agent Link uses public Windows APIs and the following public projects.
+Third-party binaries retain their own licenses and notices.
+
+Microsoft RDP samples
+  https://github.com/microsoft/rdp-dvc-plugin-samples
+  https://github.com/microsoft/SampleOutOfProcRdpPlugin
+  Copyright (c) Microsoft Corporation. MIT License.
+  Public COM interface declarations and activation/packaging examples informed
+  the native interoperability layer. No private client implementation is shipped.
+
+Windows 365 for Agents documentation
+  https://github.com/microsoft/windows-365-for-agents
+  Copyright Microsoft Corporation. Documentation: CC-BY-4.0.
+  https://creativecommons.org/licenses/by/4.0/
+  Tool names and public API descriptions inform an independently implemented
+  subset. The project is not affiliated with or certified by Windows 365.
+
+Model Context Protocol C# SDK
+  https://github.com/modelcontextprotocol/csharp-sdk
+  Apache License 2.0, included in licenses/Apache-2.0.txt.
+
+GitHub Copilot SDK
+  https://github.com/github/copilot-sdk
+  Copyright GitHub, Inc. MIT License (terms reproduced below).
+  The SDK license does not replace the separate Copilot service
+  or CLI runtime terms.
+
+.NET and Microsoft libraries
+  https://github.com/dotnet
+  MIT and applicable third-party notices. Self-contained .NET publish outputs
+  retain LICENSE.txt and ThirdPartyNotices.txt when supplied by the SDK.
+
+Windows App SDK and WinUI 3
+  https://github.com/microsoft/WindowsAppSDK
+  Copyright Microsoft Corporation. Redistributed binary components are governed
+  by the Microsoft Windows App SDK software license in licenses/WindowsAppSDK.txt,
+  not this repository's MIT license. Only application publish output is shipped;
+  private Windows App client source and build tools are not included.
+
+C#/WinRT
+  https://github.com/microsoft/CsWinRT
+  Copyright Microsoft Corporation. MIT License in licenses/CsWinRT.txt.
+
+WebView2 SDK (transitive WinUI dependency)
+  https://learn.microsoft.com/microsoft-edge/webview2/
+  Copyright Microsoft Corporation. Terms and supplied notices are retained in
+  licenses/WebView2.txt and licenses/WebView2-NOTICE.txt. No browser runtime is
+  downloaded or redistributed by Remote Agent Link.
+
+SQLite and Microsoft.Data.Sqlite
+  https://www.sqlite.org/copyright.html
+  https://github.com/dotnet/efcore
+  SQLite is public domain. Microsoft.Data.Sqlite is MIT-licensed.
+
+MIT terms for Microsoft sample material and GitHub Copilot SDK
+--------------------------------------------------------------
+Copyright (c) Microsoft Corporation.
+Copyright GitHub, Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

@@ -1,0 +1,17 @@
+name: Private security contact
+description: Request a private channel only when GitHub's private reporting form is unavailable.
+title: Private security contact requested
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This issue is public. Do not add vulnerability details, exploit steps,
+        affected private systems, logs, or attachments. Prefer the private
+        reporting link in SECURITY.md whenever it is available.
+  - type: checkboxes
+    id: request
+    attributes:
+      label: Request
+      options:
+        - label: The private reporting form is unavailable, and I need a private reporting channel. I have not included vulnerability details.
+          required: true

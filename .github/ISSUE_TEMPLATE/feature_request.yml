@@ -1,0 +1,30 @@
+name: Feature request
+description: Propose an improvement with a clear use case and permission boundary.
+title: '[Feature]: '
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: Describe the workflow that is difficult today, without private data.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Explain the user experience, affected endpoint, and alternatives considered.
+    validations:
+      required: true
+  - type: textarea
+    id: permissions
+    attributes:
+      label: Permissions and lifecycle
+      description: What requires human approval? What happens on disconnect, lock, cancellation, or failure?
+    validations:
+      required: true
+  - type: textarea
+    id: references
+    attributes:
+      label: Public references
+      description: Link public API documentation or examples. Do not attach private client source or internal design material.

@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType></PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\AgentLink.Core\AgentLink.Core.csproj" />
+    <ProjectReference Include="..\..\src\AgentLink.Desktop\AgentLink.Desktop.csproj" />
+    <ProjectReference Include="..\..\src\AgentLink.Copilot\AgentLink.Copilot.csproj" />
+    <Compile Include="..\..\src\AgentLink.Broker\EndpointIdentity.cs" Link="Security\EndpointIdentity.cs" />
+    <Compile Include="..\..\src\AgentLink.Broker\HumanConsent.cs" Link="Security\HumanConsent.cs" />
+    <Compile Include="..\..\src\AgentLink.Broker\PipeSecurity.cs" Link="Security\PipeSecurity.cs" />
+    <Compile Include="..\..\src\AgentLink.Broker\PeerAdmission.cs" Link="Security\PeerAdmission.cs" />
+    <Compile Include="..\..\src\AgentLink.Broker\BrokerHost.cs" Link="Backend\BrokerHost.cs" />
+    <Compile Include="..\..\src\AgentLink.Broker\Shell\BrokerSession.cs" Link="Backend\BrokerSession.cs" />
+    <Compile Include="..\..\src\AgentLink.Broker\BrokerDiagnostics.cs" Link="Backend\BrokerDiagnostics.cs" />
+    <Compile Include="..\..\src\AgentLink.Broker\WtsStream.cs" Link="Backend\WtsStream.cs" />
+    <Compile Include="..\..\src\AgentLink.Broker\PeerConnectionSnapshot.cs" Link="Backend\PeerConnectionSnapshot.cs" />
+    <Compile Include="..\..\src\AgentLink.Broker\PeerChannel.cs" Link="Backend\PeerChannel.cs" />
+    <Compile Include="..\..\src\AgentLink.Broker\ChannelProtocol.cs" Link="Backend\ChannelProtocol.cs" />
+    <Compile Include="..\..\src\AgentLink.Broker\ChannelFrameStream.cs" Link="Backend\ChannelFrameStream.cs" />
+  </ItemGroup>
+</Project>

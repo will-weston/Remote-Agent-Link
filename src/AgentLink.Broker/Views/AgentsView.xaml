@@ -1,0 +1,54 @@
+<UserControl
+    x:Class="AgentLink.Broker.Views.AgentsView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ScrollViewer HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Style="{StaticResource PageStackStyle}" Spacing="24">
+            <StackPanel Spacing="8">
+                <TextBlock Text="Connect your agent" Style="{StaticResource TitleTextBlockStyle}" TextWrapping="Wrap" />
+                <TextBlock Text="Give your agent the link. You stay in charge of access." Style="{StaticResource BodyText}" />
+            </StackPanel>
+            <Border Style="{StaticResource CardStyle}">
+                <StackPanel Spacing="16">
+                    <FontIcon Glyph="&#xE8F2;" FontSize="32" HorizontalAlignment="Left" />
+                    <TextBlock Text="GitHub Copilot CLI" Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <TextBlock Text="{x:Bind Model.Status, Mode=OneWay}" FontWeight="SemiBold" AutomationProperties.LiveSetting="Polite" TextWrapping="Wrap" />
+                    <TextBlock Text="{x:Bind Model.Detail, Mode=OneWay}" Style="{StaticResource BodyText}" />
+                    <Button Click="RegisterClicked" IsEnabled="{x:Bind Model.CanRegister, Mode=OneWay}" Style="{StaticResource AccentButtonStyle}">
+                        <TextBlock Text="Add to Copilot CLI" TextWrapping="Wrap" />
+                    </Button>
+                    <ProgressBar IsIndeterminate="True" Visibility="{x:Bind Model.Busy, Mode=OneWay}" AutomationProperties.Name="Adding MCP configuration" />
+                    <Button Content="Refresh setup status" Click="RefreshClicked" />
+                    <TextBlock Text="Then start a new Copilot CLI session and run:" Style="{StaticResource BodyText}" />
+                    <TextBox Text="/mcp show remote-agent-link" IsReadOnly="True" AutomationProperties.Name="Check the MCP server in Copilot" />
+                </StackPanel>
+            </Border>
+            <Border Style="{StaticResource CardStyle}">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="Why isn't there a server to find?" Style="{StaticResource SubtitleTextBlockStyle}" TextWrapping="Wrap" />
+                    <TextBlock Text="This app keeps the RDP broker running. MCP uses standard input/output: each agent starts its own ralink-mcp.exe process when it loads its configuration. There is no HTTP address or listening MCP port." Style="{StaticResource BodyText}" />
+                    <TextBlock Text="Adding MCP doesn't pair a device, grant desktop access or start a model request." Style="{StaticResource BodyText}" />
+                    <TextBlock Text="Remote discovery starts with connection tools. Pair a device in Home, then have your agent call rdp_list_connections and rdp_bind_connection. That loads the selected device's desktop and agent tools." Style="{StaticResource BodyText}" />
+                </StackPanel>
+            </Border>
+            <Expander Header="Manual setup and other agents" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                <StackPanel Spacing="16">
+                    <TextBlock Text="Run this command from the Copilot profile you use:" Style="{StaticResource BodyText}" />
+                    <TextBox Text="{x:Bind Model.Command}" IsReadOnly="True" TextWrapping="Wrap" AutomationProperties.Name="Copilot MCP setup command" />
+                    <Button Content="Copy setup command" Click="CopyCommandClicked" />
+                    <TextBlock Text="Other MCP clients need their own stdio entry. Use ralink-mcp.exe as the command, with no arguments to discover remote devices. Use --current-session only to access this PC's broker." Style="{StaticResource BodyText}" />
+                    <Button Content="Copy MCP JSON" Click="CopyJsonClicked" />
+                    <TextBox Text="{x:Bind Model.ConfigurationPath}" Header="Copilot profile checked by this app" IsReadOnly="True" TextWrapping="Wrap" />
+                    <TextBlock Text="A custom COPILOT_HOME, workspace configuration, disabled server, or organization policy can change what an agent loads. A saved entry is not proof that a particular running agent has connected." Style="{StaticResource BodyText}" />
+                </StackPanel>
+            </Expander>
+            <Border Style="{StaticResource CardStyle}">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="Use a remote Copilot" Style="{StaticResource SubtitleTextBlockStyle}" TextWrapping="Wrap" />
+                    <TextBlock Text="Pair both devices first. Managed remote tasks also need a compatible runtime, the remote user's sign-in and separate approval. Attaching to an existing interactive Copilot session isn't supported yet." Style="{StaticResource BodyText}" />
+                    <Button Content="Runtime and advanced settings" Click="SettingsClicked" />
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>
