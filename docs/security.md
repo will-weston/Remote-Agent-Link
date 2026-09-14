@@ -71,6 +71,13 @@ resolve any cleanup warning before removing the package.
 
 ## Diagnostics and retention
 
-Transport diagnostics record identities, method/error categories, and connection transitions rather than request payloads or screenshots. Durable task outputs may contain private code: retain them only as needed and treat exported diagnostics accordingly.
+Structured diagnostics record random run/channel correlation IDs, allowlisted
+method/error categories and connection transitions, never endpoint fingerprints,
+SIDs, arbitrary peer strings, exception messages or operation payloads. Private
+rotating files, queue/rate bounds and explicit loss counters limit their impact.
+They are a sampled troubleshooting history, not an audit log. Debug adds timings,
+not screenshots, keys or prompts. See [diagnostics and retention](diagnostics.md).
+Durable task outputs remain separate and may contain private code: retain them
+only as needed and do not export the entire data directory as diagnostic logs.
 
 Development MSIX signing is distinct from endpoint TLS identity. The packaging script reuses an approved persistent Windows signing identity and fails before producing replacement outputs when its private key is missing or its history is inconsistent. A genuinely first-time development identity retains a non-exportable key in the Windows user certificate store; only its public certificate is exported. A public `.cer` cannot recover a discarded private key. The script never rotates an established signer or installs trust automatically. See [signing and recovery](installation.md#build-and-signing).

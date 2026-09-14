@@ -285,6 +285,8 @@ await Test("secured pipe validates the actual connecting Windows session", async
 });
 await BackendTests.RunAsync(Test);
 await BackendTests.RunDesktopAvailabilityAsync(Test);
+await DiagnosticTests.RunAsync(Test);
+await BackendTests.RunDiagnosticsAsync(Test);
 Console.WriteLine($"All {passed} core/security tests passed.");
 return 0;
 

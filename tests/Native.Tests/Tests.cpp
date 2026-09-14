@@ -3,6 +3,7 @@
 #include "RdpPlugin.h"
 #include "ServerLifetime.h"
 #include "AgentLink.Transport.h"
+#include "Diagnostics.h"
 #include <wrl/client.h>
 #include <appxpackaging.h>
 #include <shlwapi.h>
@@ -13,6 +14,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 using Microsoft::WRL::ComPtr;
@@ -28,6 +30,59 @@ HRESULT NoClientReporter(std::wstring&) noexcept { return S_FALSE; }
 void Check(bool value, const char* message) {
     ++checks;
     if (!value) throw std::runtime_error(message);
+}
+void DiagnosticTests() {
+    ral::DiagnosticRateGate gate;
+    uint64_t suppressed{};
+    for (uint32_t i = 0; i < ral::DiagnosticRateGate::Burst; ++i)
+        Check(gate.TryAcquire(0, suppressed) && suppressed == 0, "diagnostic burst admits fixed budget");
+    for (unsigned i = 0; i < 1000; ++i)
+        Check(!gate.TryAcquire(ral::DiagnosticRateGate::WindowMs - 1, suppressed) && suppressed == 0,
+            "diagnostic retry storm stays bounded");
+    Check(gate.TryAcquire(ral::DiagnosticRateGate::WindowMs, suppressed) && suppressed == 1000,
+        "diagnostic next window reports all suppressed retries");
+    Check(gate.TryAcquire(ral::DiagnosticRateGate::WindowMs, suppressed) && suppressed == 0,
+        "diagnostic suppression count drains once");
+    Check(gate.TryAcquire(ral::DiagnosticRateGate::WindowMs * 100, suppressed),
+        "diagnostic idle window resets budget");
+    for (uint32_t i = 1; i < ral::DiagnosticRateGate::Burst; ++i)
+        Check(gate.TryAcquire(ral::DiagnosticRateGate::WindowMs * 100, suppressed),
+            "diagnostic idle window admits remaining burst");
+    Check(!gate.TryAcquire(ral::DiagnosticRateGate::WindowMs * 100, suppressed),
+        "diagnostic idle windows do not accumulate tokens");
+
+    ral::DiagnosticRateGate concurrent;
+    std::atomic<uint64_t> admitted{}, reported{};
+    std::array<std::jthread, 8> workers;
+    for (auto& worker : workers) worker = std::jthread([&] {
+        for (unsigned i = 0; i < 1000; ++i) {
+            uint64_t dropped{};
+            if (concurrent.TryAcquire(100, dropped)) {
+                ++admitted;
+                reported.fetch_add(dropped);
+            }
+        }
+    });
+    for (auto& worker : workers) worker.join();
+    Check(admitted.load() > 0 && admitted.load() <= ral::DiagnosticRateGate::Burst,
+        "concurrent diagnostics cannot exceed fixed budget");
+    Check(concurrent.TryAcquire(100 + ral::DiagnosticRateGate::WindowMs, suppressed),
+        "concurrent diagnostic gate releases its lock");
+    Check(admitted.load() + reported.load() + suppressed == 8000,
+        "rate and contention drops are counted without blocking");
+    ral::DiagnosticRateGate independent;
+    Check(independent.TryAcquire(100, suppressed) && suppressed == 0,
+        "another event budget remains available after a storm");
+
+    SetLastError(ERROR_ALREADY_EXISTS);
+    ral::InitializeDiagnostics();
+    Check(GetLastError() == ERROR_ALREADY_EXISTS, "diagnostic registration preserves Win32 error");
+    ral::WriteDiagnostic(ral::DiagnosticKind::Count, E_FAIL);
+    Check(GetLastError() == ERROR_ALREADY_EXISTS, "invalid diagnostic kind is ignored without changing error");
+    ral::WriteDiagnostic(ral::DiagnosticKind::ServerStart);
+    Check(GetLastError() == ERROR_ALREADY_EXISTS, "diagnostic emission preserves Win32 error");
+    ral::NewDiagnosticCorrelation();
+    Check(GetLastError() == ERROR_ALREADY_EXISTS, "diagnostic correlation preserves Win32 error");
 }
 std::vector<uint8_t> Pdu(uint32_t total, uint32_t flags, std::span<const uint8_t> payload = {}) {
     CHANNEL_PDU_HEADER header{total, flags};
@@ -594,6 +649,7 @@ int main(int argc, char** argv) {
     {
         ral::ServerLease keepAlive;
         try {
+            if (argc == 1 || startupOnly) DiagnosticTests();
             if (!manifestOnly && !startupOnly && !clientOnly) {
                 ProxyTests();
                 checks += ActivationTests();
@@ -614,7 +670,7 @@ int main(int argc, char** argv) {
             std::printf("PASS: %u native checks (%s).\n", checks,
                 clientOnly ? "isolated client lifecycle reporting (no production broker pipe or DVC)" :
                 activationOnly ? "isolated loading modes, COM activation and surface marshaling (test-owned pipes only)" :
-                startupOnly ? "COM executable startup" :
+                startupOnly ? "bounded diagnostics and COM executable startup" :
                 manifestOnly ? "package manifest" : "activation, PDU parser, DLL ABI, raw duplex bridge, cancellation, COM lifetime, executable startup, package manifest");
         } catch (const std::exception& error) {
             std::fprintf(stderr, "FAIL after %u checks: %s\n", checks, error.what());

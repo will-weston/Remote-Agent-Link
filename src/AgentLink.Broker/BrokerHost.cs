@@ -109,6 +109,8 @@ internal sealed class BrokerHost : IAsyncDisposable
             listeners.Add(RemoteLoopAsync());
         _listeners = listeners.ToArray();
         _listenerObservers = _listeners.Select(ObserveListenerAsync).ToArray();
+        Diagnostics.Write(DiagnosticEvent.BrokerStarted,
+            outcome: _consent.DeviceAccessEnabled ? "enabled" : "disabled");
         Raise(StatusChanged);
     }
 
@@ -121,7 +123,7 @@ internal sealed class BrokerHost : IAsyncDisposable
             Volatile.Write(ref _running, 0);
             Volatile.Write(ref _lastTransportError, "The broker listener stopped. Close duplicate brokers, check the installation, then restart Remote Agent Link.");
             Raise(StatusChanged);
-            WriteLog($"Listener failed: {exception.GetType().Name}");
+            WriteLog($"Listener failed: {exception.GetType().Name}", DiagnosticEvent.ListenerFailed, exception);
             await _stop.CancelAsync();
             _consent.SetConnected(false);
             _copilot.OnConnectionChanged(false);
@@ -173,7 +175,7 @@ internal sealed class BrokerHost : IAsyncDisposable
         {
             if (!_stop.IsCancellationRequested)
                 SetTransportError(TransportError(exception));
-            WriteLog($"Connection closed: {exception.GetType().Name}");
+            WriteLog($"Connection closed: {exception.GetType().Name}", DiagnosticEvent.ConnectionFailed, exception);
         }
         finally
         {
@@ -198,7 +200,7 @@ internal sealed class BrokerHost : IAsyncDisposable
         try { await HandleClientConnectionAsync(pipe, ReporterIdentity(pipe)); }
         catch (Exception exception) when (exception is IOException or AgentLinkException or OperationCanceledException)
         {
-            WriteLog($"Local RDP lifecycle reporter closed: {exception.GetType().Name}");
+            WriteLog($"Local RDP lifecycle reporter closed: {exception.GetType().Name}", DiagnosticEvent.ConnectionFailed, exception);
         }
     }
 
@@ -213,6 +215,7 @@ internal sealed class BrokerHost : IAsyncDisposable
     {
         ClientConnection? client = null;
         string? id = null;
+        Guid? instance = null;
         try
         {
             while (true)
@@ -226,6 +229,7 @@ internal sealed class BrokerHost : IAsyncDisposable
                 if (client is null)
                 {
                     id = info.ConnectionId;
+                    instance = report.Instance;
                     client = new(info, reporterIdentity);
                     if (!_clientConnections.TryAdd(id, client))
                         throw new AgentLinkException("duplicate_connection", "Another reporter owns this RDP client instance.");
@@ -244,6 +248,7 @@ internal sealed class BrokerHost : IAsyncDisposable
                             continue;
                     }
                 }
+                Diagnostics.Write(DiagnosticEvent.ClientLifecycle, outcome: info.State, correlation: report.Instance);
                 Raise(StatusChanged);
             }
         }
@@ -251,7 +256,10 @@ internal sealed class BrokerHost : IAsyncDisposable
         {
             if (client is not null && id is not null &&
                 _clientConnections.TryRemove(new KeyValuePair<string, ClientConnection>(id, client)))
+            {
+                Diagnostics.Write(DiagnosticEvent.ClientRemoved, correlation: instance);
                 Raise(StatusChanged);
+            }
         }
     }
 
@@ -260,7 +268,7 @@ internal sealed class BrokerHost : IAsyncDisposable
         try { await HandleClientSurfaceAsync(pipe, ReporterIdentity(pipe)); }
         catch (Exception exception) when (exception is IOException or AgentLinkException or OperationCanceledException)
         {
-            WriteLog($"Local RDP surface reporter closed: {exception.GetType().Name}");
+            WriteLog($"Local RDP surface reporter closed: {exception.GetType().Name}", DiagnosticEvent.SurfaceFailed, exception);
         }
     }
 
@@ -275,7 +283,7 @@ internal sealed class BrokerHost : IAsyncDisposable
         {
             // The diagnostic plane is optional; never take lifecycle discovery
             // or authenticated desktop transport down with it.
-            WriteLog($"Local RDP surface listener unavailable: {exception.GetType().Name}");
+            WriteLog($"Local RDP surface listener unavailable: {exception.GetType().Name}", DiagnosticEvent.SurfaceFailed, exception);
         }
     }
 
@@ -313,6 +321,8 @@ internal sealed class BrokerHost : IAsyncDisposable
                         throw new AgentLinkException("duplicate_surface_report", "Another stream owns this surface metadata.");
                     bound = client;
                     client.SurfaceOwner = owner;
+                    if (client.Info.LocalSurfaceStatus != report.Surface.Status)
+                        Diagnostics.Write(DiagnosticEvent.SurfaceChanged, outcome: report.Surface.Status, correlation: report.Instance);
                     Volatile.Write(ref client.Info, client.Info with
                     {
                         LocalSurface = report.Surface,
@@ -331,6 +341,7 @@ internal sealed class BrokerHost : IAsyncDisposable
                     if (bound.SurfaceOwner == owner)
                     {
                         bound.SurfaceOwner = null;
+                        Diagnostics.Write(DiagnosticEvent.SurfaceLost, correlation: instance);
                         Volatile.Write(ref bound.Info, bound.Info with
                         {
                             LocalSurface = null,
@@ -380,8 +391,15 @@ internal sealed class BrokerHost : IAsyncDisposable
                 }
             });
             SetTransportError(null);
+            Diagnostics.Write(DiagnosticEvent.ChannelReady, outcome: "remote", correlation: Guid.ParseExact(channel.Id, "N"));
             Raise(StatusChanged);
             await MonitorConnectionAsync(channel, true, () => 0);
+        }
+        catch (Exception exception)
+        {
+            Diagnostics.Write(DiagnosticEvent.ConnectionFailed, DiagnosticLevel.Warning,
+                correlation: Guid.ParseExact(channel.Id, "N"), exception: exception);
+            throw;
         }
         finally
         {
@@ -477,6 +495,7 @@ internal sealed class BrokerHost : IAsyncDisposable
                 if (!helloReceived.Task.IsCompletedSuccessfully)
                     throw new AgentLinkException("protocol_mismatch", "The peer disconnected before exchanging endpoint metadata.");
                 SetTransportError(null);
+                Diagnostics.Write(DiagnosticEvent.ChannelReady, outcome: "local", correlation: Guid.ParseExact(channel.Id, "N"));
                 Raise(StatusChanged);
                 await MonitorConnectionAsync(channel, false, () => Interlocked.Read(ref lastRequest));
             }
@@ -485,6 +504,12 @@ internal sealed class BrokerHost : IAsyncDisposable
                 attached.TrySetCanceled();
                 CloseChannel(channel);
             }
+        }
+        catch (Exception exception)
+        {
+            Diagnostics.Write(DiagnosticEvent.ConnectionFailed, DiagnosticLevel.Warning,
+                correlation: Guid.ParseExact(channel.Id, "N"), exception: exception);
+            throw;
         }
         finally { RemoveChannel(channel); }
     }
@@ -509,7 +534,7 @@ internal sealed class BrokerHost : IAsyncDisposable
                 if (_stop.IsCancellationRequested)
                     break;
                 if (!waitingLogged)
-                    WriteLog($"Waiting for an RDP channel: {exception.GetType().Name}");
+                    WriteLog($"Waiting for an RDP channel: {exception.GetType().Name}", DiagnosticEvent.TransportWaiting, exception);
                 if (opened || _channels.IsEmpty)
                     SetTransportError(TransportError(exception));
                 waitingLogged = true;
@@ -652,6 +677,39 @@ internal sealed class BrokerHost : IAsyncDisposable
     private async Task<OperationResult> DispatchAsync(OperationRequest request, CancellationToken cancellationToken,
         CancellationToken desktopConnection, string agentPrincipal)
     {
+        if (request.Method == "tools.list")
+            return await DispatchCoreAsync(request, cancellationToken, desktopConnection, agentPrincipal);
+        var started = Stopwatch.GetTimestamp();
+        var correlation = Guid.NewGuid();
+        Diagnostics.Write(DiagnosticEvent.OperationStarted, DiagnosticLevel.Debug, operation: request.Method, correlation: correlation);
+        try
+        {
+            var result = await DispatchCoreAsync(request, cancellationToken, desktopConnection, agentPrincipal);
+            Diagnostics.Write(DiagnosticEvent.OperationCompleted,
+                request.Method is "desktop.acquire" or "desktop.release" ? DiagnosticLevel.Information : DiagnosticLevel.Debug,
+                operation: request.Method, outcome: "ok", correlation: correlation,
+                durationMs: (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+            return result;
+        }
+        catch (OperationCanceledException)
+        {
+            Diagnostics.Write(DiagnosticEvent.OperationCancelled, DiagnosticLevel.Information,
+                operation: request.Method, outcome: "cancelled", correlation: correlation,
+                durationMs: (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+            throw;
+        }
+        catch (Exception exception)
+        {
+            Diagnostics.Write(DiagnosticEvent.OperationFailed, DiagnosticLevel.Warning,
+                operation: request.Method, outcome: "failed", correlation: correlation,
+                durationMs: (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds, exception: exception);
+            throw;
+        }
+    }
+
+    private async Task<OperationResult> DispatchCoreAsync(OperationRequest request, CancellationToken cancellationToken,
+        CancellationToken desktopConnection, string agentPrincipal)
+    {
         OperationContext.ActorId.Value = request.ActorId;
         cancellationToken.ThrowIfCancellationRequested();
         if (request.Method == "tools.list")
@@ -706,6 +764,7 @@ internal sealed class BrokerHost : IAsyncDisposable
     {
         _consent.RevokeDesktop();
         _desktop.InvalidateObservations();
+        Diagnostics.Write(DiagnosticEvent.ControlRevoked);
     }
 
     internal void SetDesktopAccessEnabled(bool enabled)
@@ -742,6 +801,8 @@ internal sealed class BrokerHost : IAsyncDisposable
         var changed = _consent.SetDesktopAccessState(enabled);
         if (!enabled) _desktop.InvalidateObservations();
         _copilot.OnDeviceAccessChanged(enabled);
+        if (changed)
+            Diagnostics.Write(DiagnosticEvent.DeviceAccessChanged, outcome: enabled ? "enabled" : "disabled");
         return changed;
     }
 
@@ -757,14 +818,16 @@ internal sealed class BrokerHost : IAsyncDisposable
                 enabled = _desktopAccessSettings.ReadCurrent();
                 if (!enabled) _unsavedDeviceBlock = false;
                 if (_unsavedDeviceBlock) enabled = false;
-                if (_deviceAccessFailure is not null) WriteLog("Shared device access settings are available again.");
+                if (_deviceAccessFailure is not null)
+                    WriteLog("Shared device access settings are available again.", DiagnosticEvent.DeviceSettingsRecovered);
                 _deviceAccessFailure = null;
             }
             catch (AgentLinkException exception)
             {
                 enabled = false;
                 if (_deviceAccessFailure != exception.Code)
-                    WriteLog($"Agent access blocked: {exception.Code}. Repair the shared device preference.");
+                    WriteLog($"Agent access blocked: {exception.Code}. Repair the shared device preference.",
+                        DiagnosticEvent.DeviceSettingsFailed, exception);
                 _deviceAccessFailure = exception.Code;
             }
             if (_consent.DeviceAccessEnabled != enabled)
@@ -793,6 +856,8 @@ internal sealed class BrokerHost : IAsyncDisposable
             throw new AgentLinkException("too_many_connections", "Too many channels are already connected.");
         }
         Raise(StatusChanged);
+        Diagnostics.Write(DiagnosticEvent.ChannelOpened, outcome: direction == PeerDirection.RemoteDesktop ? "remote" : "local",
+            correlation: Guid.ParseExact(channel.Id, "N"));
         return channel;
     }
 
@@ -801,6 +866,7 @@ internal sealed class BrokerHost : IAsyncDisposable
         if (!tls.IsMutuallyAuthenticated || !tls.IsEncrypted || tls.RemoteCertificate is null)
             throw new AuthenticationException("Mutually authenticated encrypted TLS is required.");
         _identity.AdmitChannel(tls.RemoteCertificate, trusted => channel.Authenticate(tls.RemoteCertificate, trusted));
+        Diagnostics.Write(DiagnosticEvent.ChannelAuthenticated, correlation: Guid.ParseExact(channel.Id, "N"));
         Raise(StatusChanged);
     }
 
@@ -830,6 +896,7 @@ internal sealed class BrokerHost : IAsyncDisposable
     {
         if (!channel.Close())
             return;
+        Diagnostics.Write(DiagnosticEvent.ChannelClosed, correlation: Guid.ParseExact(channel.Id, "N"));
         _agents.Disconnect(channel.Id);
         var consentChanged = false;
         lock (_remoteGate)
@@ -884,8 +951,9 @@ internal sealed class BrokerHost : IAsyncDisposable
         return delivered;
     }
 
-    private void WriteLog(string message)
+    private void WriteLog(string message, DiagnosticEvent eventId, Exception? failure = null)
     {
+        Diagnostics.Write(eventId, failure is null ? DiagnosticLevel.Information : DiagnosticLevel.Warning, exception: failure);
         if (Log is not { } handlers)
             return;
         foreach (Action<string> handler in handlers.GetInvocationList())
@@ -920,6 +988,7 @@ internal sealed class BrokerHost : IAsyncDisposable
             {
                 _desktop.Dispose();
                 _stop.Dispose();
+                Diagnostics.Write(DiagnosticEvent.BrokerStopped);
             }
         }
     }

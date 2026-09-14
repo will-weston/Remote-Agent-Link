@@ -9,9 +9,15 @@ internal sealed class StdioTestClient : IAsyncDisposable
 
     public bool NotificationSeen { get; private set; }
 
-    public StdioTestClient(string hostPath, params string[] arguments)
+    public StdioTestClient(string hostPath, params string[] arguments) : this(hostPath, null, arguments) { }
+
+    public StdioTestClient(string hostPath, IReadOnlyDictionary<string, string>? environment, params string[] arguments)
     {
-        _process = Process.Start(CreateStartInfo(hostPath, arguments))
+        var start = CreateStartInfo(hostPath, arguments);
+        if (environment is not null)
+            foreach (var (name, value) in environment)
+                start.Environment[name] = value;
+        _process = Process.Start(start)
             ?? throw new InvalidOperationException("MCP host did not start.");
         _diagnostics = _process.StandardError.ReadToEndAsync();
     }
@@ -29,6 +35,8 @@ internal sealed class StdioTestClient : IAsyncDisposable
         };
         if (!executable)
             start.ArgumentList.Add(Path.GetFullPath(hostPath));
+        // Offline protocol children must never acquire the live user's diagnostic slots.
+        start.Environment["RALINK_LOG_LEVEL"] = "off";
         foreach (var argument in arguments)
             start.ArgumentList.Add(argument);
         return start;
@@ -98,6 +106,10 @@ internal sealed class StdioTestClient : IAsyncDisposable
             }
             if (_process.ExitCode != 0)
                 throw new InvalidOperationException($"MCP host exited with {_process.ExitCode}: {await _diagnostics}");
+            if (!string.IsNullOrEmpty(await _diagnostics))
+                throw new InvalidOperationException("Successful MCP processes must not emit SDK/host messages on stderr.");
+            if (!string.IsNullOrEmpty(await _process.StandardOutput.ReadToEndAsync()))
+                throw new InvalidOperationException("MCP shutdown must not emit non-protocol output on stdout.");
         }
         finally { _process.Dispose(); }
     }

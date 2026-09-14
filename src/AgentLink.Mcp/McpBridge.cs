@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using System.Threading.Channels;
 using AgentLink.Core;
@@ -70,7 +71,16 @@ internal sealed class McpBridge(bool currentSession, string? brokerPipe = null, 
         return Task.FromResult(DeclaredTools);
     }
 
-    public void ClientInitialized() => _initialized.TrySetResult();
+    public void ClientInitialized()
+    {
+        if (_initialized.TrySetResult())
+        {
+            Diagnostics.Write(DiagnosticEvent.McpInitialized, outcome: "initialized", correlation: Guid.ParseExact(_actorId, "N"));
+            if (currentSession || _connectionId is not null)
+                Diagnostics.Write(DiagnosticEvent.McpBound, outcome: currentSession ? "current_session" : "fixed",
+                    correlation: Guid.ParseExact(_actorId, "N"));
+        }
+    }
 
     public Task WaitForClientAsync(CancellationToken cancellationToken) => _initialized.Task.WaitAsync(cancellationToken);
 
@@ -126,6 +136,10 @@ internal sealed class McpBridge(bool currentSession, string? brokerPipe = null, 
 
     public async Task<CallToolResult> CallAsync(string name, JsonElement arguments, CancellationToken cancellationToken)
     {
+        var started = Stopwatch.GetTimestamp();
+        var correlation = Guid.NewGuid();
+        Diagnostics.Write(DiagnosticEvent.OperationStarted, DiagnosticLevel.Debug,
+            operation: name, correlation: correlation);
         try
         {
             OperationResult result;
@@ -157,6 +171,8 @@ internal sealed class McpBridge(bool currentSession, string? brokerPipe = null, 
                     _connectionId = id;
                     Volatile.Write(ref _catalogLoaded, true);
                     _presenceChanges.Writer.TryWrite(0);
+                    Diagnostics.Write(DiagnosticEvent.McpBound, operation: "rdp_bind_connection",
+                        outcome: localClient ? "local" : "remote", correlation: Guid.ParseExact(_actorId, "N"));
                 }
                 finally
                 {
@@ -186,21 +202,46 @@ internal sealed class McpBridge(bool currentSession, string? brokerPipe = null, 
                         new RoutedOperation(_connectionId, currentSession, new(name, arguments, _actorId)), cancellationToken);
                 }
             }
-            return ToResult(result, guidance);
+            var response = ToResult(result, guidance);
+            Diagnostics.Write(DiagnosticEvent.OperationCompleted,
+                name is "rdp_bind_connection" or "rdp_acquire_control" or "rdp_release_control"
+                    ? DiagnosticLevel.Information : DiagnosticLevel.Debug,
+                operation: name, outcome: "ok", correlation: correlation,
+                durationMs: (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+            return response;
         }
         catch (AgentLinkException exception)
         {
+            ReportFailure(exception);
             if (exception.Code is "disconnected" or "untrusted_peer" or "pairing_required" or "invalid_response")
                 Volatile.Write(ref _catalogLoaded, false);
             return Error(exception.Code, exception.Message + " " + McpGuidance.FailureBoundary);
         }
         catch (Exception exception) when (exception is IOException or TimeoutException)
         {
+            ReportFailure(exception);
             Volatile.Write(ref _catalogLoaded, false);
             return Error("connection_unavailable",
                 "The broker or remote connection is unavailable. Start the broker and reconnect. An unacknowledged mutation may have executed. " +
                 McpGuidance.FailureBoundary);
         }
+        catch (OperationCanceledException exception)
+        {
+            Diagnostics.Write(DiagnosticEvent.OperationCancelled, operation: name, outcome: "cancelled",
+                correlation: correlation, durationMs: (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds,
+                exception: exception);
+            throw;
+        }
+        catch (Exception exception)
+        {
+            ReportFailure(exception);
+            throw;
+        }
+
+        void ReportFailure(Exception exception) =>
+            Diagnostics.Write(DiagnosticEvent.OperationFailed, DiagnosticLevel.Warning,
+                operation: name, outcome: "failed", correlation: correlation,
+                durationMs: (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds, exception: exception);
     }
 
     private static void RequireEmpty(JsonElement arguments)

@@ -59,6 +59,14 @@ Copilot task state is separate from transport state. Task acceptance, dispatch a
 
 ## Deployment boundaries
 
+Broker and MCP entrypoints own a shared Core diagnostic writer: fixed-schema,
+allowlisted JSONL records pass through a bounded nonblocking queue to a private,
+rotating file slot. Lifecycle/access changes and failures are enabled by default;
+successful ordinary calls are sampled only in debug. Rate/queue loss is counted,
+and logging failure cannot change authorization or transport behavior. Native
+activation/transport diagnostics remain separate opt-in ETW. See
+[diagnostics](diagnostics.md) for limits, paths and failure semantics.
+
 - x64 only initially; native/RID payloads must not be mixed across architectures.
 - The broker and MCP host have separate publish directories to isolate their dependency graphs.
 - The UIA worker must retain its complete executable/dependency/runtime bundle.

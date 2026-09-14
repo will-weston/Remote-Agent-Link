@@ -29,7 +29,7 @@
       <LinkLibraryDependencies>false</LinkLibraryDependencies>
     </ProjectReference>
   </ItemGroup>
-  <ItemGroup><ClCompile Include="main.cpp" /><ClCompile Include="RdpPlugin.cpp" /><ClCompile Include="ActivationFactory.cpp" /><ClCompile Include="PluginLoadingMode.cpp" /></ItemGroup>
+  <ItemGroup><ClCompile Include="main.cpp" /><ClCompile Include="RdpPlugin.cpp" /><ClCompile Include="ActivationFactory.cpp" /><ClCompile Include="PluginLoadingMode.cpp" /><ClCompile Include="..\Common\Diagnostics.cpp" /></ItemGroup>
   <ItemGroup><ClInclude Include="RdpPlugin.h" /><ClInclude Include="ServerLifetime.h" /><ClInclude Include="SurfaceMetadata.h" /></ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

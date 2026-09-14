@@ -104,6 +104,11 @@ public sealed partial class MainWindow : Window
             return Task.CompletedTask;
         });
         _settingsView.CopyMcpRequested += CopyMcpConfiguration;
+        _settingsView.OpenDiagnosticsRequested += () => RunUi(() =>
+        {
+            Process.Start(new ProcessStartInfo(_settings.DiagnosticsDirectory) { UseShellExecute = true });
+            return Task.CompletedTask;
+        });
         _settingsView.ThemeRequested += SetTheme;
         _settingsView.PluginLoadingRequested += modern => RunUi(() => SetPluginLoadingAsync(modern));
         _settingsView.PluginLoadingRefreshRequested += RefreshPluginLoading;
@@ -628,6 +633,7 @@ public sealed partial class MainWindow : Window
     private void RefreshStatus()
     {
         if (_isClosed) return;
+        _settings.DiagnosticsStatus = Diagnostics.Status;
         Model.Update(_session.Host.PeerConnections, _session.Host.IsRunning, _session.Host.LastTransportError,
             _session.Consent.HasDesktopLease, _session.Host.Connections, _session.Consent.DesktopAccessEnabled,
             _session.Host.GetAgentConnections());

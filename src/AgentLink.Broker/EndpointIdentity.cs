@@ -1,5 +1,4 @@
 using System.Net.Security;
-using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Security.Principal;
@@ -258,19 +257,7 @@ internal sealed class EndpointIdentity : IDisposable
         }
     }
 
-    internal static void EnsurePrivateDirectory(string directory)
-    {
-        var info = Directory.CreateDirectory(directory);
-        var sid = WindowsIdentity.GetCurrent().User ?? throw new InvalidOperationException("Missing Windows identity.");
-        var security = new DirectorySecurity();
-        if (!sid.Equals(info.GetAccessControl(AccessControlSections.Owner).GetOwner(typeof(SecurityIdentifier))))
-            security.SetOwner(sid);
-        security.SetAccessRuleProtection(true, false);
-        security.AddAccessRule(new FileSystemAccessRule(sid, FileSystemRights.FullControl,
-            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
-            PropagationFlags.None, AccessControlType.Allow));
-        info.SetAccessControl(security);
-    }
+    internal static void EnsurePrivateDirectory(string directory) => PrivateStorage.EnsureDirectory(directory);
 
     public void Dispose() => Certificate.Dispose();
 }

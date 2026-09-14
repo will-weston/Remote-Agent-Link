@@ -74,6 +74,12 @@
             <Expander Header="Local storage and endpoint details" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
                 <StackPanel Spacing="12">
                     <TextBlock Text="{x:Bind Model.Role}" TextWrapping="Wrap" />
+                    <TextBlock Text="Diagnostics" Style="{StaticResource SubtitleTextBlockStyle}" TextWrapping="Wrap" />
+                    <TextBlock Text="{x:Bind Model.DiagnosticsStatus, Mode=OneWay}" TextWrapping="Wrap" />
+                    <TextBox Text="{x:Bind Model.DiagnosticsDirectory}" Header="Bounded diagnostic logs" IsReadOnly="True" TextWrapping="Wrap" />
+                    <Button Click="OpenDiagnosticsClicked"><TextBlock Text="Open diagnostic logs" TextWrapping="Wrap" /></Button>
+                    <TextBlock Text="Local rotating logs record connection changes and failures, not screen contents, typed text or prompts. Repeated events are rate-limited. Set RALINK_LOG_LEVEL=debug before starting the app for sampled successful-operation timings; restart to apply. See docs/diagnostics.md for MCP logs and native tracing."
+                               Style="{StaticResource BodyText}" />
                     <TextBox Text="{x:Bind Model.DataDirectory}" Header="This session’s private data directory" IsReadOnly="True" TextWrapping="Wrap" />
                     <Button Click="OpenDataClicked"><TextBlock Text="Open local configuration folder" TextWrapping="Wrap" /></Button>
                     <TextBlock Text="Task data stays on this device. Back up needed outputs before uninstalling. To reconcile an unknown managed turn, quit the broker and use --reconcile-session only after independently confirming the prior turn has stopped."

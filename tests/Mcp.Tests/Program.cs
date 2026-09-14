@@ -186,6 +186,26 @@ try
         await Stable(client);
     }
     fixture.ReadinessErrorCode = null;
+    await using (var client = new StdioTestClient(args[0], new Dictionary<string, string>
+    {
+        ["Logging__LogLevel__Default"] = "Trace",
+        ["Logging__LogLevel__ModelContextProtocol"] = "Trace"
+    }, "--connection", "test-connection", "--broker-pipe", pipeName))
+    {
+        await client.InitializeAsync();
+        await Stable(client);
+        Check(!IsError(await client.CallAsync("rdp_acquire_control", new { })), "SDK trace settings changed control acquisition.");
+        Check(!IsError(await client.CallAsync("type_text", new { text = "private-prompt-DO-NOT-LOG" })),
+            "SDK trace settings changed tool arguments or results.");
+        fixture.ReadinessErrorCode = "private-peer-error-DO-NOT-LOG";
+        Check(ErrorCode(await client.CallAsync("type_text", new { text = "private-failed-prompt-DO-NOT-LOG" })) ==
+            "private-peer-error-DO-NOT-LOG", "Diagnostics must not sanitize the protocol's original peer error.");
+        fixture.ReadinessErrorCode = null;
+        Check(IsError(await client.CallAsync("private-tool-name-DO-NOT-LOG", new { privateValue = "private-argument-DO-NOT-LOG" })),
+            "Unknown tool unexpectedly executed.");
+        Check(!IsError(await client.CallAsync("rdp_release_control", new { })), "SDK trace settings changed control release.");
+        await Stable(client);
+    }
     foreach (var payload in new[]
     {
         "null", "{}", "[null]",

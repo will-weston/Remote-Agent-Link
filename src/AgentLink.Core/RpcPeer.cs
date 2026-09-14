@@ -165,7 +165,8 @@ public sealed class RpcPeer : IAsyncDisposable
         catch (Exception exception)
         {
             // Isolate handler faults at the RPC boundary; do not expose remote stacks.
-            Console.Error.WriteLine($"Operation {message.Method} failed: {exception.GetType().Name}");
+            Diagnostics.Write(DiagnosticEvent.RpcFailed, DiagnosticLevel.Error, operation: message.Method,
+                correlation: Guid.ParseExact(message.Id, "N"), exception: exception);
             response = new("response", message.Id, Error: new("operation_failed",
                 "The operation failed and may have executed. Inspect task or desktop state before retrying a mutation. See endpoint diagnostics."));
         }
@@ -184,7 +185,8 @@ public sealed class RpcPeer : IAsyncDisposable
         }
         catch (Exception exception) when (exception is IOException or OperationCanceledException or ObjectDisposedException)
         {
-            Console.Error.WriteLine($"Response delivery failed: {exception.GetType().Name}");
+            Diagnostics.Write(DiagnosticEvent.RpcDeliveryFailed, DiagnosticLevel.Warning, operation: message.Method,
+                correlation: Guid.ParseExact(message.Id, "N"), exception: exception);
         }
         finally
         {

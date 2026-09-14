@@ -1,6 +1,7 @@
 #include "AgentLink.Transport.h"
 #include "PduReassembler.h"
 #include "WinHandle.h"
+#include "Diagnostics.h"
 #include <wtsapi32.h>
 #include <array>
 #include <atomic>
@@ -10,6 +11,8 @@
 
 namespace {
 struct Context {
+    const GUID correlation{ral::NewDiagnosticCorrelation()};
+    bool opened{};
     HANDLE channel{};
     HANDLE file{}; // Borrowed from WTSVirtualChannelQuery, owned by channel.
     ral::WinHandle readEvent{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
@@ -28,13 +31,20 @@ struct Context {
             GetOverlappedResult(file, &readOperation, &ignored, TRUE);
         }
         if (channel) WTSVirtualChannelClose(channel);
+        if (opened) ral::WriteDiagnostic(ral::DiagnosticKind::WtsClose, S_OK, 0, correlation);
     }
     DWORD Fail(DWORD error) noexcept {
         DWORD expected{};
-        fault.compare_exchange_strong(expected, error);
+        if (fault.compare_exchange_strong(expected, error))
+            ral::WriteDiagnostic(ral::DiagnosticKind::WtsFailure, HRESULT_FROM_WIN32(error), 0, correlation);
         return fault.load();
     }
 };
+
+void OpenFailed(uint32_t* output, DWORD error) noexcept {
+    *output = error;
+    ral::WriteDiagnostic(ral::DiagnosticKind::WtsOpen, HRESULT_FROM_WIN32(error));
+}
 
 DWORD Read(Context& context, uint8_t* buffer, uint32_t capacity, uint32_t timeout, uint32_t& count) {
     std::lock_guard lock(context.readLock);
@@ -125,48 +135,51 @@ DWORD Write(Context& context, const uint8_t* buffer, uint32_t length, uint32_t& 
 }
 
 extern "C" void* __stdcall RAL_Open(const wchar_t* channelName, uint32_t* error) noexcept {
+    ral::InitializeDiagnostics();
     if (!error) return nullptr;
     *error = ERROR_SUCCESS;
     if (!channelName || wcscmp(channelName, L"RALink.v1") != 0) {
-        *error = ERROR_INVALID_PARAMETER;
+        OpenFailed(error, ERROR_INVALID_PARAMETER);
         return nullptr;
     }
     try {
         DWORD session{};
         if (!ProcessIdToSessionId(GetCurrentProcessId(), &session)) {
-            *error = GetLastError();
+            OpenFailed(error, GetLastError());
             return nullptr;
         }
         if (!session) {
-            *error = ERROR_ACCESS_DENIED;
+            OpenFailed(error, ERROR_ACCESS_DENIED);
             return nullptr;
         }
         auto context = std::make_unique<Context>();
         if (!context->readEvent) {
-            *error = GetLastError();
+            OpenFailed(error, GetLastError());
             return nullptr;
         }
         char name[] = "RALink.v1";
         context->channel = WTSVirtualChannelOpenEx(WTS_CURRENT_SESSION, name, WTS_CHANNEL_OPTION_DYNAMIC);
         if (!context->channel) {
-            *error = GetLastError();
+            OpenFailed(error, GetLastError());
             return nullptr;
         }
         void* value{};
         DWORD size{};
         if (!WTSVirtualChannelQuery(context->channel, WTSVirtualFileHandle, &value, &size)) {
-            *error = GetLastError();
+            OpenFailed(error, GetLastError());
             return nullptr;
         }
         if (value && size == sizeof(HANDLE)) std::memcpy(&context->file, value, sizeof(HANDLE));
         WTSFreeMemory(value);
         if (!context->file || context->file == INVALID_HANDLE_VALUE) {
-            *error = ERROR_INVALID_HANDLE;
+            OpenFailed(error, ERROR_INVALID_HANDLE);
             return nullptr;
         }
+        context->opened = true;
+        ral::WriteDiagnostic(ral::DiagnosticKind::WtsOpen, S_OK, 0, context->correlation);
         return context.release();
-    } catch (const std::bad_alloc&) { *error = ERROR_NOT_ENOUGH_MEMORY; }
-    catch (...) { *error = ERROR_GEN_FAILURE; }
+    } catch (const std::bad_alloc&) { OpenFailed(error, ERROR_NOT_ENOUGH_MEMORY); }
+    catch (...) { OpenFailed(error, ERROR_GEN_FAILURE); }
     return nullptr;
 }
 

@@ -3,6 +3,7 @@
 #include "SurfaceMetadata.h"
 #include "WinHandle.h"
 #include "PduReassembler.h"
+#include "Diagnostics.h"
 #include <sddl.h>
 #include <wrl/client.h>
 #include <algorithm>
@@ -197,6 +198,7 @@ public:
         if (!stop_ || !changed_ || FAILED(CoCreateGuid(&report_.instance)) ||
             FAILED(CoCreateGuid(&report_.epoch))) throw std::runtime_error("client lifecycle initialization");
     }
+    const GUID& Instance() const noexcept { return report_.instance; }
     void Start(IWTSVirtualChannelManager* manager) {
         std::wstring name;
         const auto result = resolver_(name);
@@ -209,6 +211,7 @@ public:
                 self.reset();
                 CoUninitialize();
             } else {
+                WriteDiagnostic(DiagnosticKind::ReporterFailure, initialized, 0, self->Instance());
                 self->Stop();
             }
         }).detach();
@@ -216,7 +219,12 @@ public:
         // an apartment-bound pointer to this worker from an unsupported caller.
         APTTYPE apartment{};
         APTTYPEQUALIFIER qualifier{};
-        if (FAILED(CoGetApartmentType(&apartment, &qualifier)) || apartment != APTTYPE_MTA) return;
+        const auto apartmentResult = CoGetApartmentType(&apartment, &qualifier);
+        if (FAILED(apartmentResult) || apartment != APTTYPE_MTA) {
+            WriteDiagnostic(DiagnosticKind::ReporterFailure,
+                FAILED(apartmentResult) ? apartmentResult : RPC_E_WRONG_THREAD, 1, Instance());
+            return;
+        }
         try {
             std::thread([self = shared_from_this(), manager = ComPtr<IWTSVirtualChannelManager>(manager)]() mutable {
                 const auto initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -225,28 +233,40 @@ public:
                     manager.Reset();
                     self.reset();
                     CoUninitialize();
+                } else {
+                    WriteDiagnostic(DiagnosticKind::ReporterFailure, initialized, 1, self->Instance());
                 }
             }).detach();
-        } catch (...) { OutputDebugStringW(L"AgentLink: optional surface worker unavailable.\n"); }
+        } catch (...) { WriteDiagnostic(DiagnosticKind::ReporterFailure, CurrentException(), 1, Instance()); }
     }
     HRESULT Connected() noexcept {
         std::lock_guard lock(lock_);
         if (report_.state != 1) {
             GUID epoch{};
             const auto result = CoCreateGuid(&epoch);
-            if (FAILED(result)) return result;
+            if (FAILED(result)) {
+                WriteDiagnostic(DiagnosticKind::PluginConnected, result, 0, Instance());
+                return result;
+            }
             report_.epoch = epoch;
             report_.state = 1;
             SetEvent(changed_.get());
+            WriteDiagnostic(DiagnosticKind::PluginConnected, S_OK, 0, Instance());
         }
         return S_OK;
     }
     void Disconnected() noexcept {
         std::lock_guard lock(lock_);
+        if (report_.state != 2)
+            WriteDiagnostic(DiagnosticKind::PluginDisconnected, S_OK, 0, Instance());
         report_.state = 2;
         SetEvent(changed_.get());
     }
-    void Stop() noexcept { SetEvent(stop_.get()); }
+    void Stop() noexcept {
+        SetEvent(stop_.get());
+        if (!stopReported_.exchange(true))
+            WriteDiagnostic(DiagnosticKind::PluginTerminated, S_OK, 0, Instance());
+    }
 private:
     template<class Report> bool Write(HANDLE pipe, HANDLE event, const Report& report) noexcept {
         OVERLAPPED operation{};
@@ -275,7 +295,10 @@ private:
             SurfaceRpcDeadline rpc(stop_.get());
             auto signal = std::make_shared<SurfaceSignal>();
             WinHandle completed(CreateEventW(nullptr, TRUE, FALSE, nullptr));
-            if (!signal->changed || !completed) return;
+            if (!signal->changed || !completed) {
+                WriteDiagnostic(DiagnosticKind::ReporterFailure, E_FAIL, 1, Instance());
+                return;
+            }
             ComPtr<WindowChangedCallback> callback;
             callback.Attach(new WindowChangedCallback(signal));
             ComPtr<IWTSWindowInfoService> service;
@@ -371,30 +394,48 @@ private:
                     revision != previousRevision ||
                     std::memcmp(&report.hwnd, &previous.hwnd, sizeof(report) - offsetof(SurfaceReport, hwnd)) != 0)
                     ++generation;
+                if (previous.generation == 0 || report.epoch != previous.epoch ||
+                    report.status != previous.status || report.result != previous.result)
+                    WriteDiagnostic(DiagnosticKind::SurfaceStatus, report.result,
+                        static_cast<uint32_t>(report.status), Instance());
                 report.generation = generation;
                 previous = report;
                 previousRevision = revision;
                 if (!pipe) {
                     pipe.reset(CreateFileW(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
                         OPEN_EXISTING, FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr));
-                    if (pipe && VerifyPipeServer(pipe.get()) != ERROR_SUCCESS) pipe.reset();
+                    const auto error = pipe ? VerifyPipeServer(pipe.get()) : GetLastError();
+                    if (error != ERROR_SUCCESS) {
+                        WriteDiagnostic(DiagnosticKind::ReporterFailure, HRESULT_FROM_WIN32(error), 3, Instance());
+                        pipe.reset();
+                    }
                 }
-                if (pipe && !Write(pipe.get(), completed.get(), report)) pipe.reset();
+                if (pipe && !Write(pipe.get(), completed.get(), report)) {
+                    WriteDiagnostic(DiagnosticKind::ReporterFailure, HRESULT_FROM_WIN32(ERROR_WRITE_FAULT), 3, Instance());
+                    pipe.reset();
+                }
                 HANDLE waits[]{stop_.get(), signal->changed.get()};
                 if (WaitForMultipleObjects(2, waits, FALSE, 1000) == WAIT_OBJECT_0) break;
             }
-        } catch (...) { OutputDebugStringW(L"AgentLink: optional surface probe failed; lifecycle reporting continues.\n"); }
+        } catch (...) { WriteDiagnostic(DiagnosticKind::ReporterFailure, CurrentException(), 1, Instance()); }
     }
     void Run(const std::wstring& name) noexcept {
         try {
             WinHandle completed(CreateEventW(nullptr, TRUE, FALSE, nullptr));
-            if (!completed) return;
+            if (!completed) {
+                WriteDiagnostic(DiagnosticKind::ReporterFailure, HRESULT_FROM_WIN32(GetLastError()), 0, Instance());
+                return;
+            }
             WinHandle pipe;
             while (WaitForSingleObject(stop_.get(), 0) != WAIT_OBJECT_0) {
                 if (!pipe) {
                     pipe.reset(CreateFileW(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
                         OPEN_EXISTING, FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr));
-                    if (pipe && VerifyPipeServer(pipe.get()) != ERROR_SUCCESS) pipe.reset();
+                    const auto error = pipe ? VerifyPipeServer(pipe.get()) : GetLastError();
+                    if (error != ERROR_SUCCESS) {
+                        WriteDiagnostic(DiagnosticKind::ReporterFailure, HRESULT_FROM_WIN32(error), 2, Instance());
+                        pipe.reset();
+                    }
                     if (!pipe) {
                         if (WaitForSingleObject(stop_.get(), 1000) == WAIT_OBJECT_0) break;
                         continue;
@@ -407,6 +448,7 @@ private:
                     snapshot = report_;
                 }
                 if (!Write(pipe.get(), completed.get(), snapshot)) {
+                    WriteDiagnostic(DiagnosticKind::ReporterFailure, HRESULT_FROM_WIN32(ERROR_WRITE_FAULT), 2, Instance());
                     pipe.reset();
                     if (WaitForSingleObject(stop_.get(), 1000) == WAIT_OBJECT_0) break;
                     continue;
@@ -414,7 +456,7 @@ private:
                 HANDLE waits[]{stop_.get(), changed_.get()};
                 if (WaitForMultipleObjects(2, waits, FALSE, 3000) == WAIT_OBJECT_0) break;
             }
-        } catch (...) { OutputDebugStringW(L"AgentLink: client lifecycle reporter failed.\n"); }
+        } catch (...) { WriteDiagnostic(DiagnosticKind::ReporterFailure, CurrentException(), 0, Instance()); }
     }
     ServerLease lease_;
     const ClientConnectionPipeResolver resolver_;
@@ -422,6 +464,7 @@ private:
     WinHandle changed_{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
     std::mutex lock_;
     ClientReport report_;
+    std::atomic<bool> stopReported_{};
 };
 
 class Bridge : public std::enable_shared_from_this<Bridge> {
@@ -447,6 +490,7 @@ public:
                 self.reset();
                 CoUninitialize();
             } else {
+                self->Failure(initialized);
                 self->Stop();
             }
         });
@@ -457,13 +501,18 @@ public:
         SetEvent(stop_.get());
     }
     HRESULT Enqueue(ULONG size, const BYTE* bytes) noexcept {
-        if (size && !bytes) { Stop(); return E_POINTER; }
-        if (size > MaxRecordBytes) { Stop(); return HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE); }
+        if (size && !bytes) { Failure(E_POINTER); Stop(); return E_POINTER; }
+        if (size > MaxRecordBytes) {
+            Failure(HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE));
+            Stop();
+            return HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE);
+        }
         try {
             std::lock_guard lock(queueLock_);
             if (Stopped()) return HRESULT_FROM_WIN32(ERROR_OPERATION_ABORTED);
             if (!size) return S_OK;
             if (size > MaxQueuedBytes - queuedBytes_) {
+                Failure(HRESULT_FROM_WIN32(ERROR_NOT_ENOUGH_QUOTA));
                 Stop();
                 return HRESULT_FROM_WIN32(ERROR_NOT_ENOUGH_QUOTA);
             }
@@ -471,9 +520,18 @@ public:
             queuedBytes_ += size;
             SetEvent(dataReady_.get());
             return S_OK;
-        } catch (...) { Stop(); return CurrentException(); }
+        } catch (...) {
+            const auto result = CurrentException();
+            Failure(result);
+            Stop();
+            return result;
+        }
     }
 private:
+    void Failure(HRESULT result) noexcept {
+        if (result != HRESULT_FROM_WIN32(ERROR_OPERATION_ABORTED) && !failureReported_.exchange(true))
+            WriteDiagnostic(DiagnosticKind::BridgeFailure, result, 0, correlation_);
+    }
     bool Stopped() const noexcept { return WaitForSingleObject(stop_.get(), 0) == WAIT_OBJECT_0; }
 
     static void CALLBACK CancelRpc(PTP_CALLBACK_INSTANCE, void* context, PTP_TIMER) noexcept {
@@ -484,6 +542,8 @@ private:
             std::lock_guard lock(self.rpcLock_);
             if (self.rpcThread_ && ((self.Stopped() && !self.rpcClosing_) ||
                 GetTickCount64() - self.rpcSince_ >= RpcTimeoutMs)) {
+                if (GetTickCount64() - self.rpcSince_ >= RpcTimeoutMs)
+                    self.Failure(HRESULT_FROM_WIN32(ERROR_TIMEOUT));
                 self.Stop();
                 CoCancelCall(self.rpcThread_, 0);
             }
@@ -507,19 +567,27 @@ private:
     }
     WinHandle ConnectPipe() {
         std::wstring name;
-        if (FAILED(GetBrokerPipeName(name))) return {};
+        const auto named = GetBrokerPipeName(name);
+        if (FAILED(named)) { Failure(named); return {}; }
         const auto deadline = GetTickCount64() + ConnectTimeoutMs;
         while (!Stopped()) {
             WinHandle pipe(CreateFileW(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
                 OPEN_EXISTING, FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr));
             if (pipe) {
-                if (VerifyPipeServer(pipe.get()) == ERROR_SUCCESS) return pipe;
+                const auto verified = VerifyPipeServer(pipe.get());
+                if (verified == ERROR_SUCCESS) return pipe;
+                Failure(HRESULT_FROM_WIN32(verified));
                 return {};
             }
             const auto error = GetLastError();
-            if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PIPE_BUSY && error != ERROR_PIPE_NOT_CONNECTED)
+            if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PIPE_BUSY && error != ERROR_PIPE_NOT_CONNECTED) {
+                Failure(HRESULT_FROM_WIN32(error));
                 return {};
-            if (GetTickCount64() >= deadline) return {};
+            }
+            if (GetTickCount64() >= deadline) {
+                Failure(HRESULT_FROM_WIN32(ERROR_TIMEOUT));
+                return {};
+            }
             if (WaitForSingleObject(stop_.get(), 100) == WAIT_OBJECT_0) return {};
         }
         return {};
@@ -547,16 +615,22 @@ private:
     }
     void ReadPipe(HANDLE pipe) noexcept {
         const auto initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-        if (FAILED(initialized)) { Stop(); return; }
+        if (FAILED(initialized)) { Failure(initialized); Stop(); return; }
         const auto cancellation = CoEnableCallCancellation(nullptr);
+        if (FAILED(cancellation)) Failure(cancellation);
         if (SUCCEEDED(cancellation)) {
             WinHandle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+            if (!event) Failure(HRESULT_FROM_WIN32(GetLastError()));
             std::array<BYTE, TransportChunkBytes> bytes{};
             while (event && !Stopped()) {
                 DWORD count{};
-                if (PipeIo(pipe, event.get(), false, bytes.data(), static_cast<DWORD>(bytes.size()), count))
+                const auto error = PipeIo(pipe, event.get(), false, bytes.data(), static_cast<DWORD>(bytes.size()), count);
+                if (error) {
+                    Failure(HRESULT_FROM_WIN32(error));
                     break;
-                if (FAILED(ChannelCall(false, count, bytes.data()))) break;
+                }
+                const auto result = ChannelCall(false, count, bytes.data());
+                if (FAILED(result)) { Failure(result); break; }
             }
             CoDisableCallCancellation(nullptr);
         }
@@ -565,6 +639,7 @@ private:
     }
     void WritePipe(HANDLE pipe) {
         WinHandle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+        if (!event) Failure(HRESULT_FROM_WIN32(GetLastError()));
         const HANDLE waits[]{stop_.get(), dataReady_.get()};
         while (event && !Stopped()) {
             if (WaitForMultipleObjects(2, waits, FALSE, INFINITE) != WAIT_OBJECT_0 + 1) break;
@@ -579,8 +654,10 @@ private:
             size_t sent{};
             while (sent < bytes.size()) {
                 DWORD count{};
-                if (PipeIo(pipe, event.get(), true, bytes.data() + sent,
-                    static_cast<DWORD>(std::min(bytes.size() - sent, size_t{TransportChunkBytes})), count)) {
+                const auto error = PipeIo(pipe, event.get(), true, bytes.data() + sent,
+                    static_cast<DWORD>(std::min(bytes.size() - sent, size_t{TransportChunkBytes})), count);
+                if (error) {
+                    Failure(HRESULT_FROM_WIN32(error));
                     Stop();
                     break;
                 }
@@ -595,6 +672,7 @@ private:
     }
     void Run() noexcept {
         const auto cancellation = CoEnableCallCancellation(nullptr);
+        if (FAILED(cancellation)) Failure(cancellation);
         FILETIME due{};
         const LONGLONG relative = -1000000; // First watchdog tick in 100 ms.
         std::memcpy(&due, &relative, sizeof(due));
@@ -604,13 +682,17 @@ private:
         try {
             if (SUCCEEDED(cancellation)) pipe = ConnectPipe();
             if (pipe) {
+                WriteDiagnostic(DiagnosticKind::BridgeOpen, S_OK, 0, correlation_);
                 reader = std::thread([this, handle = pipe.get()] { ReadPipe(handle); });
                 WritePipe(pipe.get());
             }
-        } catch (...) { OutputDebugStringW(L"AgentLink: transport worker failed.\n"); }
+        } catch (...) { Failure(CurrentException()); }
         Stop();
         if (reader.joinable()) reader.join();
-        if (!remoteClosed_.load() && SUCCEEDED(cancellation)) ChannelCall(true);
+        if (!remoteClosed_.load() && SUCCEEDED(cancellation)) {
+            const auto result = ChannelCall(true);
+            if (FAILED(result)) Failure(result);
+        }
         // Drop the external proxy even if the client keeps our callback alive.
         channel_.Reset();
         pipe.reset();
@@ -622,9 +704,12 @@ private:
         SetThreadpoolTimer(timer_, nullptr, 0, 0);
         WaitForThreadpoolTimerCallbacks(timer_, TRUE);
         if (SUCCEEDED(cancellation)) CoDisableCallCancellation(nullptr);
+        WriteDiagnostic(DiagnosticKind::BridgeClose, S_OK, remoteClosed_.load() ? 1u : 0u, correlation_);
     }
 
     ServerLease lease_;
+    const GUID correlation_{NewDiagnosticCorrelation()};
+    std::atomic<bool> failureReported_{};
     ComPtr<IWTSVirtualChannel> channel_;
     WinHandle stop_{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
     WinHandle dataReady_{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
@@ -696,7 +781,11 @@ public:
             *callback = handler.Detach();
             *accept = TRUE;
             return S_OK;
-        } catch (...) { return CurrentException(); }
+        } catch (...) {
+            const auto result = CurrentException();
+            WriteDiagnostic(DiagnosticKind::BridgeFailure, result);
+            return result;
+        }
     }
 private:
     std::shared_ptr<PluginState> state_;
@@ -725,15 +814,22 @@ public:
                 std::lock_guard lock(state_->lock);
                 listenerFailed_ = true;
                 state_->accepting = false;
-                OutputDebugStringW(L"AgentLink: DVC listener unavailable; local client discovery remains active.\n");
+                WriteDiagnostic(DiagnosticKind::ListenerUnavailable, result, 0, reporter_->Instance());
+                WriteDiagnostic(DiagnosticKind::PluginInitialize, S_OK, 1, reporter_->Instance());
                 return S_OK;
             }
             {
                 std::lock_guard lock(state_->lock);
                 if (!state_->terminated) listener_ = std::move(listener);
             }
+            WriteDiagnostic(DiagnosticKind::PluginInitialize, S_OK, 0, reporter_->Instance());
             return S_OK;
-        } catch (...) { state_->Stop(true, reporter_.get()); return CurrentException(); }
+        } catch (...) {
+            const auto result = CurrentException();
+            WriteDiagnostic(DiagnosticKind::PluginInitialize, result, 0, reporter_->Instance());
+            state_->Stop(true, reporter_.get());
+            return result;
+        }
     }
     HRESULT STDMETHODCALLTYPE Connected() noexcept override {
         std::lock_guard lock(state_->lock);
@@ -827,6 +923,7 @@ HRESULT CreatePluginFactory(PluginLoadingMode selectedMode, IWTSPluginFactory** 
 
 HRESULT CreatePluginFactory(PluginLoadingMode activationMode, PluginLoadingMode selectedMode,
     IWTSPluginFactory** factory, ClientConnectionPipeResolver resolver) noexcept {
+    InitializeDiagnostics();
     if (!factory) return E_POINTER;
     *factory = nullptr;
     if (!IsValidLoadingMode(activationMode) || !IsValidLoadingMode(selectedMode) || !resolver) return E_INVALIDARG;
@@ -836,6 +933,7 @@ HRESULT CreatePluginFactory(PluginLoadingMode activationMode, PluginLoadingMode 
 
 HRESULT CreatePluginActivation(PluginLoadingMode activationMode, PluginLoadingMode selectedMode,
     REFIID iid, void** object, ClientConnectionPipeResolver resolver) noexcept {
+    InitializeDiagnostics();
     if (!object) return E_POINTER;
     *object = nullptr;
     if (!IsValidLoadingMode(activationMode) || !IsValidLoadingMode(selectedMode) || !resolver) return E_INVALIDARG;

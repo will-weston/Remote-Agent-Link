@@ -259,6 +259,12 @@ Use only a compatible CLI/runtime with an explicitly supported authenticated ser
 
 ## Disconnect, updates, and recovery
 
+For connection, access or MCP failures, use the [diagnostic logs](diagnostics.md).
+Settings shows the broker's actual private log directory and writer status.
+Logging is bounded and payload-free; temporarily enable local
+`RALINK_LOG_LEVEL=debug` for sampled operation timings, then restart the relevant
+process. It does not enable native tracing or change agent permissions.
+
 Desktop operations stop on disconnect or unavailable desktop. Non-UI jobs continue only under an explicitly scoped unattended task and finite policy/budget while device access remains enabled. Unsupported scope/managed-policy requests cannot be turned into silent approvals. There is no out-of-band status or cancellation channel to the disconnected local machine.
 
 Reconnect to the same authenticated logon and retrieve the existing task ID/events. Do not resubmit a prompt simply because its acknowledgement was lost. An interrupted/unknown dispatch requires reconciliation, not an automatic retry.

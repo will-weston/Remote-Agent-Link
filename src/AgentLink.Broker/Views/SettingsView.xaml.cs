@@ -11,6 +11,7 @@ public sealed partial class SettingsView : UserControl
     public event Action? StartupRefreshRequested;
     public event Action? RuntimeRequested;
     public event Action? OpenDataRequested;
+    public event Action? OpenDiagnosticsRequested;
     public event Action<int, string>? CopyMcpRequested;
     public event Action<ElementTheme>? ThemeRequested;
     public event Action<bool>? PluginLoadingRequested;
@@ -45,6 +46,7 @@ public sealed partial class SettingsView : UserControl
     private void RefreshStartupClicked(object sender, RoutedEventArgs args) => StartupRefreshRequested?.Invoke();
     private void RuntimeClicked(object sender, RoutedEventArgs args) => RuntimeRequested?.Invoke();
     private void OpenDataClicked(object sender, RoutedEventArgs args) => OpenDataRequested?.Invoke();
+    private void OpenDiagnosticsClicked(object sender, RoutedEventArgs args) => OpenDiagnosticsRequested?.Invoke();
     private void CopyMcpClicked(object sender, RoutedEventArgs args) => CopyMcpRequested?.Invoke(McpTarget.SelectedIndex, ConnectionId.Text);
     private void ThemeChanged(object sender, SelectionChangedEventArgs args)
     {

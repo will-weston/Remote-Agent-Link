@@ -1,4 +1,5 @@
 using System.Diagnostics.Tracing;
+using AgentLink.Core;
 
 namespace AgentLink.Broker;
 
@@ -15,6 +16,11 @@ internal static class BrokerDiagnostics
 {
     internal static void ObserverFailed(BrokerObserver observer, Exception exception)
     {
+        if (Diagnostics.DirectoryPath is not null)
+        {
+            Diagnostics.Write(DiagnosticEvent.ObserverFailed, DiagnosticLevel.Warning, exception: exception);
+            return;
+        }
         var source = observer.ToString();
         var failure = FailureType(exception);
         BrokerDiagnosticEvents.Instance.ObserverFailure(source, failure);

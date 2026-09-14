@@ -1,5 +1,6 @@
 #include "RdpPlugin.h"
 #include "ServerLifetime.h"
+#include "Diagnostics.h"
 #include <new>
 
 namespace ral {
@@ -18,12 +19,25 @@ public:
         try {
             PluginLoadingMode selected = static_cast<PluginLoadingMode>(MAXDWORD);
             const auto result = reader_ ? reader_(context_, &selected) : ReadPluginLoadingMode(&selected);
-            if (FAILED(result)) return result;
-            if (result != S_OK || !IsValidLoadingMode(selected))
+            if (FAILED(result)) {
+                WriteDiagnostic(DiagnosticKind::Activation, result, 4);
+                return result;
+            }
+            if (result != S_OK || !IsValidLoadingMode(selected)) {
+                WriteDiagnostic(DiagnosticKind::Activation, HRESULT_FROM_WIN32(ERROR_INVALID_DATA), 4);
                 return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
-            return CreatePluginActivation(mode_, selected, iid, object, resolver_);
-        } catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
-        catch (...) { return E_FAIL; }
+            }
+            const auto activation = CreatePluginActivation(mode_, selected, iid, object, resolver_);
+            WriteDiagnostic(DiagnosticKind::Activation, activation,
+                static_cast<uint32_t>(mode_) * 2 + static_cast<uint32_t>(selected));
+            return activation;
+        } catch (const std::bad_alloc&) {
+            WriteDiagnostic(DiagnosticKind::Activation, E_OUTOFMEMORY, 4);
+            return E_OUTOFMEMORY;
+        } catch (...) {
+            WriteDiagnostic(DiagnosticKind::Activation, E_FAIL, 4);
+            return E_FAIL;
+        }
     }
 
     HRESULT STDMETHODCALLTYPE LockServer(BOOL lock) noexcept override {
@@ -59,6 +73,7 @@ private:
 
 HRESULT CreatePluginClassFactory(REFCLSID clsid, IClassFactory** factory,
     PluginLoadingModeReader reader, void* context, ClientConnectionPipeResolver resolver) noexcept {
+    InitializeDiagnostics();
     if (!factory) return E_POINTER;
     *factory = nullptr;
     if (clsid != PluginFactoryClsid && clsid != LegacyPluginClsid) return CLASS_E_CLASSNOTAVAILABLE;

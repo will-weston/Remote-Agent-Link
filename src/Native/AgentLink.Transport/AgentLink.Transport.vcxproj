@@ -22,7 +22,7 @@
       <AdditionalDependencies>wtsapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
-  <ItemGroup><ClCompile Include="Transport.cpp" /></ItemGroup>
+  <ItemGroup><ClCompile Include="Transport.cpp" /><ClCompile Include="..\Common\Diagnostics.cpp" /></ItemGroup>
   <ItemGroup><ClInclude Include="AgentLink.Transport.h" /><None Include="AgentLink.Transport.def" /></ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

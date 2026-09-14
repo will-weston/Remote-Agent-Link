@@ -8,7 +8,10 @@ public sealed class SettingsViewModel : ObservableModel
     private string _startupStatus = "Checking Windows startup registration…";
     private string _runtimeStatus = "Choose an installed executable. No runtime is downloaded, started or authenticated by setup.";
     private string _pluginLoadingStatus = "Checking RDP loading settings...";
+    private string _diagnosticsStatus = "Starting";
     public string DataDirectory { get; internal set; } = "";
+    public string DiagnosticsDirectory => Path.Combine(DataDirectory, "diagnostics");
+    public string DiagnosticsStatus { get => _diagnosticsStatus; internal set => Set(ref _diagnosticsStatus, value); }
     public string Role { get; internal set; } = "";
     public string RuntimeRequirement => $"Copilot {OfficialSdkRuntimeFactory.RequiredRuntimeVersion} · SDK {OfficialSdkRuntimeFactory.SdkVersion}";
     public string RuntimeStatus { get => _runtimeStatus; internal set => Set(ref _runtimeStatus, value); }

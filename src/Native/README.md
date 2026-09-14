@@ -41,6 +41,93 @@ headers belong to `AgentLink.ProxyStub`'s intermediate directory. Do not check
 them in. Include `AgentLink.ProxyStub\THIRD-PARTY-NOTICES.txt` with redistributed
 proxy/stub binaries.
 
+## Bounded native diagnostics (opt-in ETW)
+
+The plugin EXE and WTS DLL register the self-describing TraceLogging provider
+**`RemoteAgentLink.Native`**, GUID
+**`945B8A72-5A20-4B8B-B3A3-B77D82860D15`**. There was no earlier native ETW
+provider; this replaces the plugin's unstructured debugger messages. Registration
+is best-effort on process entry/activation or `RAL_Open`, not in `DllMain` or
+data/window callbacks. There is no native file writer, logging worker, queue,
+dependency, or native-to-broker diagnostic protocol.
+
+Without an enabled ETW session, event calls return before reading the clock or
+updating rate counters. Enabled logging uses fixed storage and admits at most
+**eight records per event kind per 60-second window, per loaded native module**.
+There are 16 kinds (at most 128 admissions across their windows); these are
+fixed windows starting at the first admitted event, not rolling windows, so a
+boundary can admit two bursts close together. Idle time does not bank bursts.
+The gate makes one atomic try-lock attempt and drops on contention rather than
+waiting. The next admitted record of that kind includes the number suppressed
+by rate/lock contention since the previous admission. There is no flush timer:
+final suppression totals can disappear at exit. ETW can also lose events;
+`Suppressed` does not measure ETW delivery or collector loss.
+
+All records use event name **`NativeDiagnostic`**, level **4 (Information)**,
+keyword **`0x1`**, including failures. Fixed fields are `Kind` (UInt32),
+`Result` (HRESULT; Win32 failures use `HRESULT_FROM_WIN32`), `State` (UInt32),
+`Correlation` (GUID), and `Suppressed` (UInt64). No free-form strings, payloads,
+keys, screenshots, prompts, paths, peer labels, window handles/geometry, tokens
+or user/logon identities enter these fields. ETW's normal event header still
+contains timestamps and process/thread IDs. Correlation uses the existing random
+plugin-instance GUID for lifecycle/service events and a separate random GUID
+per DVC bridge or WTS context; it is zero when unavailable/not applicable.
+It does not assert a cross-machine, DVC-to-plugin or broker-peer association.
+
+| Kind | Meaning | State |
+| --- | --- | --- |
+| 0 `ServerStart` | COM initialization result | 0 |
+| 1 `ServerStop` | COM server final result | 0 |
+| 2 `Activation` | Class activation result and captured loader selection | 0 Modern/Modern, 1 Modern/Legacy, 2 Legacy/Modern, 3 Legacy/Legacy (requested/selected); 4 settings/activation failure without a usable selection |
+| 3 `PluginInitialize` | Initialization result | 0 normal, 1 discovery-only after listener failure |
+| 4 `PluginConnected` | Transition to connected, or epoch creation failure | 0 |
+| 5 `PluginDisconnected` | Transition to disconnected | 0; no client-supplied reason |
+| 6 `PluginTerminated` | First reporter stop | 0 |
+| 7 `ListenerUnavailable` | DVC listener creation failed; discovery retained | 0 |
+| 8 `BridgeOpen` | DVC worker connected to verified local broker pipe | 0 |
+| 9 `BridgeClose` | DVC worker cleanup completed, including failed opens | 0 local/worker shutdown, 1 remote close observed |
+| 10 `BridgeFailure` | First significant bridge failure; retries collapse to final timeout | 0 |
+| 11 `ReporterFailure` | Worker, broker pipe open/verification or write failure | 0 lifecycle worker, 1 surface worker, 2 lifecycle pipe, 3 surface pipe; failed writes use bounded `ERROR_WRITE_FAULT` category |
+| 12 `SurfaceStatus` | First probe result or changed status/HRESULT/epoch only | 0 Pending, 1 ServiceUnavailable, 2 ServiceError, 3 UnsupportedSession, 4 InvalidGeometry, 5 IdentityAmbiguous |
+| 13 `WtsOpen` | WTS open result | 0 |
+| 14 `WtsClose` | Previously opened WTS context closed | 0 |
+| 15 `WtsFailure` | First sticky WTS stream fault | 0 |
+
+Successful byte transfers, read polls, heartbeats, window notifications and
+geometry/frame changes alone do not log. A service candidate never implies
+capture/input support. Diagnostic calls are `noexcept`, preserve `GetLastError`,
+and cannot change transport errors, access checks or cancellation behavior.
+These are sampled troubleshooting events, not an audit trail; absence of an
+event does not establish success. Managed rotating files remain separate.
+
+### Local collection
+
+The following syntax is verified against the local Windows `logman create
+trace /?` and `logman stop /?` help. Run only when intentionally collecting,
+from the repository root in a PowerShell session with ETW-controller rights:
+
+```powershell
+New-Item -ItemType Directory -Force .\artifacts | Out-Null
+logman create trace RemoteAgentLink-Native -p "{945B8A72-5A20-4B8B-B3A3-B77D82860D15}" 0x1 4 -o "$PWD\artifacts\native-diagnostics.etl" -f bincirc -max 32 -bs 64 -nb 2 8 -ets
+# Reproduce the issue, then stop only this trace session:
+logman stop RemoteAgentLink-Native -ets
+```
+
+This requests a circular 32-MB ETL with 64-KB buffers (2 minimum, 8 maximum;
+Windows may adjust buffer counts). Choose an unused trace name and do not
+replace/stop another user's session. No installation, manifest registration or
+trust change is needed. The collector, not callbacks, writes the ETL. Inspect it
+with an ETW viewer supporting TraceLogging, such as Windows Performance Analyzer.
+No collection session or installed-client acceptance was run to validate this
+change. Treat collected ETLs as private diagnostics; review before sharing.
+
+`Native.Tests.exe --startup-only` includes deterministic fake-clock burst,
+retry, concurrency/drop-accounting and Win32-error-preservation checks, plus
+the existing real COM-startup probe. `--activation-only` and
+`--client-lifecycle-only` exercise instrumented lifecycles using test-owned
+identities/pipes. These safe subsets do not prove live ETW delivery or the full
+bridge suite; use the full native runner only in an idle broker-free session.
+
 ## Packaged COM identities
 
 The application factory CLSID is

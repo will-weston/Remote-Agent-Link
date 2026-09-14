@@ -92,6 +92,11 @@ To save a specific target in your MCP configuration, set `args` to `["--connecti
 
 RDP disconnect revokes desktop control. Only explicitly scoped unattended non-UI tasks may continue while the remote user stays logged in and device access remains enabled; reconnect retrieves existing task IDs and events rather than resubmitting prompts. The remote user's Copilot authentication remains remote.
 
+Connection and operation diagnostics are available through **Settings > Local
+storage and endpoint details > Open diagnostic logs**. Logging is private,
+rotating and rate-limited; debug adds sampled timings, never keys, screenshots or
+prompts. See the [diagnostic guide](docs/diagnostics.md) for MCP logs and native tracing.
+
 See [installation and recovery](docs/installation.md), [architecture](docs/architecture.md), [protocol](docs/protocol.md), [API compatibility](docs/api-compatibility.md), and [security](docs/security.md).
 
 ## Contributing and reporting

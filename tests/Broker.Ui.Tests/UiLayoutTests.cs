@@ -15,6 +15,15 @@ internal static class UiLayoutTests
         var window = Read("MainWindow.xaml");
         var home = Read(Path.Combine("Views", "ConnectionsView.xaml"));
         var resources = Read("App.xaml");
+        var settings = Read(Path.Combine("Views", "SettingsView.xaml"));
+        check(settings.Descendants(ui + "TextBox").Any(element =>
+                (string?)element.Attribute("Text") == "{x:Bind Model.DiagnosticsDirectory}" &&
+                (string?)element.Attribute("IsReadOnly") == "True") &&
+            settings.Descendants(ui + "Button").Any(element => (string?)element.Attribute("Click") == "OpenDiagnosticsClicked"),
+            "Settings exposes the actual private diagnostic directory and an explicit local open action.");
+        check(settings.Descendants(ui + "TextBlock").Any(element =>
+            (string?)element.Attribute("Text") == "{x:Bind Model.DiagnosticsStatus, Mode=OneWay}"),
+            "Settings shows whether bounded file diagnostics are available.");
         check(window.Descendants(ui + "TitleBar").Count() == 1, "The app uses a single native WinUI titlebar.");
         check((string?)window.Descendants(ui + "NavigationView").Single().Attribute("IsTitleBarAutoPaddingEnabled") == "False",
             "Navigation does not reserve a second titlebar strip below the app titlebar.");

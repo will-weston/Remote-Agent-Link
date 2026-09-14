@@ -1,10 +1,9 @@
 using AgentLink.Core;
 using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Logging;
 
-internal sealed class McpPresenceService(McpBridge bridge, ILogger<McpPresenceService> logger) : BackgroundService
+internal sealed class McpPresenceService(McpBridge bridge) : BackgroundService
 {
-    private string? _lastFailure;
+    private bool _reportingFailed;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -37,24 +36,25 @@ internal sealed class McpPresenceService(McpBridge bridge, ILogger<McpPresenceSe
         try
         {
             await bridge.UpdatePresenceAsync(connected, deadline.Token);
-            if (_lastFailure is not null)
-                logger.LogInformation("Agent connection status reporting recovered.");
-            _lastFailure = null;
+            if (_reportingFailed)
+                Diagnostics.Write(DiagnosticEvent.McpPresenceRecovered, operation: "mcp.presence", outcome: "recovered");
+            _reportingFailed = false;
         }
-        catch (AgentLinkException exception) { Report(exception.Code); }
-        catch (Exception exception) when (exception is IOException or TimeoutException) { Report("connection_unavailable"); }
-        catch (OperationCanceledException) when (deadline.IsCancellationRequested)
+        catch (AgentLinkException exception) { Report(exception); }
+        catch (Exception exception) when (exception is IOException or TimeoutException) { Report(exception); }
+        catch (OperationCanceledException exception) when (deadline.IsCancellationRequested)
         {
             if (connected && cancellationToken.IsCancellationRequested) throw;
-            Report("status_update_timeout");
+            Report(exception);
         }
     }
 
-    private void Report(string code)
+    private void Report(Exception exception)
     {
         // Heartbeats report presence only; a failed status update must not hide the tool catalog.
-        if (_lastFailure != code)
-            logger.LogWarning("Could not update agent connection status ({Code}). Tool access is unchanged.", code);
-        _lastFailure = code;
+        if (!_reportingFailed)
+            Diagnostics.Write(DiagnosticEvent.McpPresenceFailed, DiagnosticLevel.Warning,
+                operation: "mcp.presence", outcome: "unavailable", exception: exception);
+        _reportingFailed = true;
     }
 }

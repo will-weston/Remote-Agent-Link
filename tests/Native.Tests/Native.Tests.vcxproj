@@ -43,6 +43,7 @@
     <ClCompile Include="ActivationTests.cpp" />
     <ClCompile Include="CrossProcessActivationTests.cpp" />
     <ClCompile Include="SurfaceAbiTests.cpp" />
+    <ClCompile Include="..\..\src\Native\Common\Diagnostics.cpp" />
     <ClCompile Include="..\..\src\Native\AgentLink.RdpPlugin\RdpPlugin.cpp" />
     <ClCompile Include="..\..\src\Native\AgentLink.RdpPlugin\PluginLoadingMode.cpp" />
     <ClCompile Include="..\..\src\Native\AgentLink.RdpPlugin\ActivationFactory.cpp" />

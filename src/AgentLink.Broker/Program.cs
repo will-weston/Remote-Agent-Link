@@ -45,6 +45,7 @@ internal static class Program
                 return 1;
             }
         }
+        DiagnosticLog? diagnostics = null;
         try
         {
             if (Process.GetCurrentProcess().SessionId == 0)
@@ -54,6 +55,8 @@ internal static class Program
             EndpointIdentity.EnsurePrivateDirectory(root);
             var data = Path.Combine(root, "sessions", $"{Process.GetCurrentProcess().SessionId}-{logon}");
             EndpointIdentity.EnsurePrivateDirectory(data);
+            diagnostics = Diagnostics.Start(DiagnosticComponent.Broker, Path.Combine(data, "diagnostics"));
+            Diagnostics.Write(DiagnosticEvent.ProcessStarted, outcome: role);
             if (reconcile is not null)
             {
                 if (!Guid.TryParseExact(reconcile, "N", out _))
@@ -81,12 +84,18 @@ internal static class Program
         }
         catch (Exception exception)
         {
+            Diagnostics.Write(DiagnosticEvent.ProcessFailed, DiagnosticLevel.Error, exception: exception);
             // The executable boundary reports startup/shutdown failures instead of
             // leaving a success-shaped background process.
             NativeWindow.Message($"{exception.GetType().Name}: {exception.Message}", "Remote Agent Link failed");
             return 1;
         }
-        finally { mutex.ReleaseMutex(); }
+        finally
+        {
+            Diagnostics.Write(DiagnosticEvent.ProcessStopped);
+            diagnostics?.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            mutex.ReleaseMutex();
+        }
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]

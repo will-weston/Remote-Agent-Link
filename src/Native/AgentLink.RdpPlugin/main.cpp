@@ -1,14 +1,17 @@
 #include "RdpPlugin.h"
 #include "ServerLifetime.h"
 #include "WinHandle.h"
+#include "Diagnostics.h"
 #include <wrl/client.h>
 #include <array>
 #include <cstdio>
 #include <string_view>
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int) {
+    ral::InitializeDiagnostics();
     const bool checkStartup = std::wstring_view(commandLine ? commandLine : L"") == L"--check-startup";
     const auto initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    ral::WriteDiagnostic(ral::DiagnosticKind::ServerStart, initialized);
     if (FAILED(initialized)) return static_cast<int>(initialized);
     ral::WinHandle shutdown(CreateEventW(nullptr, TRUE, FALSE, nullptr));
     HRESULT result = shutdown ? S_OK : HRESULT_FROM_WIN32(GetLastError());
@@ -50,10 +53,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int) {
     ral::ServerShutdownEvent = nullptr;
     if (FAILED(result)) {
         std::fwprintf(stderr, L"AgentLink.RdpPlugin: COM startup failed (0x%08lX).\n", static_cast<unsigned long>(result));
-        OutputDebugStringW(L"AgentLink.RdpPlugin: COM startup failed.\n");
     } else if (checkStartup) {
         std::puts("COM startup initialized; no plugin classes registered or RDP channels opened.");
     }
     CoUninitialize();
+    ral::WriteDiagnostic(ral::DiagnosticKind::ServerStop, result);
     return FAILED(result) ? static_cast<int>(result) : 0;
 }
