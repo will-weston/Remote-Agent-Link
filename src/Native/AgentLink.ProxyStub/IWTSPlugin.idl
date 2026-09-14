@@ -57,3 +57,38 @@ interface IWTSPluginFactory : IUnknown {
     HRESULT GetPluginCount([out, retval] long* count);
     HRESULT CreatePlugin([in] long index, [out, retval] IWTSPlugin** plugin);
 };
+
+[object, uuid(D3E07363-087C-476C-86A7-DBB15F46DDB4)]
+interface IWTSPluginServiceProvider : IUnknown {
+    HRESULT GetService([in] GUID ServiceId, [out] IUnknown** ppunkObject);
+};
+
+typedef enum RdpSessionType {
+    Desktop = 0,
+    RemoteApp = 1
+} RdpSessionType;
+
+typedef struct WTSWindowInfo {
+    HWND Hwnd;
+    int Height;
+    int Width;
+    int ViewWidth;
+    int ViewHeight;
+    int ViewOffsetX;
+    int ViewOffsetY;
+    float Scale;
+} WTSWindowInfo;
+
+[object, uuid(E8A47FD3-1AF6-4D7F-8E15-515CCAE1C00C)]
+interface IWTSWindowChangedCallback : IUnknown {
+    HRESULT WindowChanged([in] const WTSWindowInfo* windowInfo);
+};
+
+[object, uuid(2A002C7B-0120-4D04-BFB1-3C73110C8581)]
+interface IWTSWindowInfoService : IUnknown {
+    HRESULT GetWindowInfo([in] HWND remoteHwnd, [out] WTSWindowInfo* windowInfo);
+    HRESULT GetRdpClientProcessId([out, retval] unsigned long* processId);
+    HRESULT GetRdpSessionType([out, retval] RdpSessionType* sessionType);
+    HRESULT SubscribeWindowChanged([in] HWND remoteHwnd, [in] IWTSWindowChangedCallback* windowChanged);
+    HRESULT UnsubscribeWindowChanged([in] HWND remoteHwnd, [in] IWTSWindowChangedCallback* windowChanged);
+};

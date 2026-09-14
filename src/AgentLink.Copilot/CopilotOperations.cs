@@ -26,6 +26,8 @@ public sealed class CopilotOperations : IOperationHandler, IAsyncDisposable
     private TaskCompletionSource _connectionAvailable = NewSignal();
     private CancellationTokenSource _connectionEpoch = new();
     private bool _connected;
+    private bool _deviceAccessEnabled;
+    private readonly HashSet<string> _disconnectedPrincipals = new(StringComparer.Ordinal);
     private int _disposed;
 
     public CopilotOperations(IConsentService consent, string dataDirectory)
@@ -45,12 +47,13 @@ public sealed class CopilotOperations : IOperationHandler, IAsyncDisposable
         }
         catch { _writerLease.Dispose(); throw; }
         _connected = consent.IsConnected;
+        _deviceAccessEnabled = consent.DeviceAccessEnabled;
         if (_connected) _connectionAvailable.TrySetResult();
     }
 
-    public IReadOnlyList<ToolDefinition> Tools { get; } = CreateTools();
+    public IReadOnlyList<ToolDefinition> Tools => AgentToolCatalog.All;
 
-    /// <summary>Local-human Control UI only: lists this Windows user's tasks across paired peers, even offline.</summary>
+    /// <summary>Local-human Control UI only: lists this Windows user's tasks across authenticated peers, even offline.</summary>
     public IReadOnlyList<AgentTask> ListLocalTasks(int limit = 100, bool activeOnly = false, string? beforeTaskId = null)
     {
         EnterInvocation();
@@ -86,8 +89,11 @@ public sealed class CopilotOperations : IOperationHandler, IAsyncDisposable
         var previousActor = OperationContext.ActorId.Value;
         try
         {
-            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _lifetime.Token);
+            EnsureDeviceAccess();
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _lifetime.Token,
+                _consent.DeviceAccessLifetime);
             var ct = linked.Token;
+            ct.ThrowIfCancellationRequested();
             var owner = Arguments.Required(request.ActorId ?? OperationContext.ActorId.Value ?? "local", "actorId", 256);
             OperationContext.ActorId.Value = owner;
             return request.Method switch
@@ -134,6 +140,45 @@ public sealed class CopilotOperations : IOperationHandler, IAsyncDisposable
         }
     }
 
+    public void OnDeviceAccessChanged(bool enabled)
+    {
+        lock (_connectionGate)
+        {
+            if (Volatile.Read(ref _disposed) != 0) return;
+            _deviceAccessEnabled = enabled;
+            if (!enabled)
+                foreach (var worker in _workers.Values)
+                {
+                    _store.Update(worker.Task.TaskId, task => task with { CancellationRequested = true },
+                        "cancellation_requested", new { deliveredToBroker = true, requestedBy = "device-access" });
+                    worker.Cancel("device_access_disabled");
+                }
+        }
+    }
+
+    public void OnPrincipalDisconnected(string principal)
+    {
+        lock (_connectionGate)
+        {
+            _disconnectedPrincipals.Add(principal);
+            foreach (var handle in _sessions.Values.Where(handle => handle.Session.Owner == principal))
+                if (handle.Worker is { Task.Grant.Unattended: false } worker)
+                    worker.Cancel("connection_lost");
+        }
+    }
+
+    public void OnPrincipalConnected(string principal)
+    {
+        lock (_connectionGate) _disconnectedPrincipals.Remove(principal);
+    }
+
+    private void EnsureDeviceAccess()
+    {
+        lock (_connectionGate)
+            if (!_deviceAccessEnabled || !_consent.DeviceAccessEnabled)
+                throw new AgentLinkException("device_access_disabled", "Allow agents to use this device is turned off.");
+    }
+
     private bool Connected { get { lock (_connectionGate) return _connected && _consent.IsConnected; } }
 
     private OperationResult List(string owner, JsonElement arguments)
@@ -171,17 +216,24 @@ public sealed class CopilotOperations : IOperationHandler, IAsyncDisposable
                 session.WorkingDirectory), ct).ConfigureAwait(false);
             var handle = new SessionHandle(session);
             handle.Runtime = await _factory.OpenManagedAsync(session, resume, Callbacks(handle), ct).ConfigureAwait(false);
-            if (handle.Runtime.IsExternal)
+            try
+            {
+                if (handle.Runtime.IsExternal)
+                    throw new AgentLinkException("incompatible_runtime", "The managed adapter did not return an owned runtime.");
+                ct.ThrowIfCancellationRequested();
+                EnsureDeviceAccess();
+                session = session with { Attached = true };
+                handle.Session = session;
+                session = _store.SaveSession(session);
+                handle.Session = session;
+                _sessions[session.SessionId] = handle;
+                return Result(session);
+            }
+            catch
             {
                 await handle.Runtime.DisposeAsync().ConfigureAwait(false);
-                throw new AgentLinkException("incompatible_runtime", "The managed adapter did not return an owned runtime.");
+                throw;
             }
-            session = session with { Attached = true };
-            handle.Session = session;
-            session = _store.SaveSession(session);
-            handle.Session = session;
-            _sessions[session.SessionId] = handle;
-            return Result(session);
         }
         finally { _sessionLifecycle.Release(); }
     }
@@ -210,14 +262,21 @@ public sealed class CopilotOperations : IOperationHandler, IAsyncDisposable
             var session = new AgentSession(registration.SessionId, workspace, owner, "live", registration.RegistrationId);
             var handle = new SessionHandle(session);
             handle.Runtime = await _factory.AttachAsync(registration, Callbacks(handle), ct).ConfigureAwait(false);
-            if (!handle.Runtime.IsExternal || !await handle.Runtime.IsIdleAsync(ct).ConfigureAwait(false))
+            try
+            {
+                if (!handle.Runtime.IsExternal || !await handle.Runtime.IsIdleAsync(ct).ConfigureAwait(false))
+                    throw new AgentLinkException("session_busy", "The interactive session is not available for exclusive delegated work.");
+                ct.ThrowIfCancellationRequested();
+                EnsureDeviceAccess();
+                session = _store.SaveSession(session);
+                _sessions[session.SessionId] = handle;
+                return Result(session);
+            }
+            catch
             {
                 await handle.Runtime.DisposeAsync().ConfigureAwait(false);
-                throw new AgentLinkException("session_busy", "The interactive session is not available for exclusive delegated work.");
+                throw;
             }
-            session = _store.SaveSession(session);
-            _sessions[session.SessionId] = handle;
-            return Result(session);
         }
         finally { _sessionLifecycle.Release(); }
     }
@@ -296,12 +355,29 @@ public sealed class CopilotOperations : IOperationHandler, IAsyncDisposable
             var now = DateTimeOffset.UtcNow;
             var task = new AgentTask(Guid.NewGuid().ToString("N"), session.SessionId, key, fingerprint, prompt,
                 "accepted", grant, now, now.AddSeconds(grant.TimeoutSeconds));
-            _store.Accept(task);
-            // After this transaction the request token is deliberately no longer relevant.
-            var worker = new Worker(task, _lifetime.Token);
-            handle.Worker = worker;
-            _workers[task.TaskId] = worker;
-            worker.Execution = Task.Run(() => RunAsync(handle, worker), CancellationToken.None);
+            lock (_connectionGate)
+            {
+                EnsureDeviceAccess();
+                if (_disconnectedPrincipals.Contains(owner))
+                    throw new AgentLinkException("disconnected", "The authenticated endpoint disconnected before task acceptance.");
+                ct.ThrowIfCancellationRequested();
+                // Capture and register the epoch before committing. No during the
+                // transaction must cancel a worker, never strand an accepted row.
+                var worker = new Worker(task, _lifetime.Token, _consent.DeviceAccessLifetime);
+                try
+                {
+                    ct.ThrowIfCancellationRequested();
+                    _store.Accept(task);
+                }
+                catch
+                {
+                    worker.Dispose();
+                    throw;
+                }
+                handle.Worker = worker;
+                _workers[task.TaskId] = worker;
+                worker.Execution = Task.Run(() => RunAsync(handle, worker), CancellationToken.None);
+            }
             return Result(PublicTask(task));
         }
         finally { gate.Release(); }
@@ -347,8 +423,12 @@ public sealed class CopilotOperations : IOperationHandler, IAsyncDisposable
             }
             string state = !knownStopped ? "outcome_unknown" :
                 code is "connection_lost" or "broker_stopping" ? "interrupted" :
-                code == "cancelled" ? "cancelled" : "failed";
-            _store.Update(saved.TaskId, task => task with { State = state, ErrorCode = code });
+                code is "cancelled" or "device_access_disabled" ? "cancelled" : "failed";
+            _store.Update(saved.TaskId, task => task with
+            {
+                State = state, ErrorCode = code,
+                CancellationRequested = task.CancellationRequested || code == "device_access_disabled"
+            });
             if (!knownStopped)
             {
                 handle.Session = handle.Session with { RequiresReconciliation = true };
@@ -388,7 +468,7 @@ public sealed class CopilotOperations : IOperationHandler, IAsyncDisposable
                 case "budget_exhausted":
                     if (value.UsedAiCredits is { } credits && double.IsFinite(credits) && credits >= 0)
                         _store.Update(worker.Task.TaskId, task => task with { CreditWindowUsed = credits }, "budget_usage", new { usedAiCredits = credits });
-                    SetState(worker, "waiting_for_approval", "The AI-credit soft limit is exhausted; a model cannot increase it.");
+                    worker.Cancel("budget_exhausted");
                     break;
                 case "usage" when value.EventId is not null && value.NanoAiu is { } amount:
                     _store.RecordUsage(worker.Task.TaskId, value.EventId, amount);
@@ -403,6 +483,7 @@ public sealed class CopilotOperations : IOperationHandler, IAsyncDisposable
         try
         {
             ct.ThrowIfCancellationRequested();
+            EnsureDeviceAccess();
             if (permission.Path is not null)
             {
                 try
@@ -420,28 +501,12 @@ public sealed class CopilotOperations : IOperationHandler, IAsyncDisposable
                 }
                 catch (AgentLinkException) { return false; }
             }
-            if (PathPolicy.Preauthorized(permission, worker.Task.Grant, _directory))
-                return true;
-            SetState(worker, permission.RequiresDesktop ? "waiting_for_desktop" : "waiting_for_approval",
-                Limit(permission.Summary, 8192));
-            while (true)
-            {
-                await WaitConnectedAsync(ct).ConfigureAwait(false);
-                CancellationToken epoch;
-                lock (_connectionGate) epoch = _connectionEpoch.Token;
-                using var approval = CancellationTokenSource.CreateLinkedTokenSource(ct, epoch);
-                try
-                {
-                    var allowed = await _consent.RequestAsync(new(Capability,
-                        $"One-time {permission.Kind} approval (not a model-answerable question): {Limit(permission.Summary, 8192)}",
-                        worker.Task.Grant.WorkingDirectory, worker.Task.Grant.Unattended), approval.Token).WaitAsync(approval.Token).ConfigureAwait(false);
-                    approval.Token.ThrowIfCancellationRequested();
-                    if (!Connected) continue;
-                    SetState(worker, "running");
-                    return allowed && (!permission.RequiresDesktop || _consent.DesktopAllowed);
-                }
-                catch (OperationCanceledException) when (!ct.IsCancellationRequested) { }
-            }
+            // Removing dialogs must not broaden workspace, command or managed-policy
+            // grants. Unsupported permissions are denied, not queued or replayed.
+            var allowed = PathPolicy.Preauthorized(permission, worker.Task.Grant, _directory);
+            ct.ThrowIfCancellationRequested();
+            EnsureDeviceAccess();
+            return allowed;
         }
         finally { worker.Interaction.Release(); }
     }
@@ -541,7 +606,7 @@ public sealed class CopilotOperations : IOperationHandler, IAsyncDisposable
         lock (_connectionGate) epoch = _connectionEpoch.Token;
         using var approval = CancellationTokenSource.CreateLinkedTokenSource(ct, epoch);
         if (!await _consent.RequestAsync(request, approval.Token).WaitAsync(approval.Token).ConfigureAwait(false))
-            throw new AgentLinkException("consent_denied", "The local human did not authorize this action.");
+            throw new AgentLinkException("consent_denied", "The endpoint policy did not authorize this action.");
         EnsureConnected();
         approval.Token.ThrowIfCancellationRequested();
     }
@@ -559,7 +624,8 @@ public sealed class CopilotOperations : IOperationHandler, IAsyncDisposable
 
     private void EnsureConnected()
     {
-        if (!Connected) throw new AgentLinkException("disconnected", "An authenticated connection and local human consent are required.");
+        EnsureDeviceAccess();
+        if (!Connected) throw new AgentLinkException("disconnected", "An authenticated session is required.");
     }
 
     private void SetState(Worker worker, string state, string? summary = null) =>
@@ -626,11 +692,13 @@ public sealed class CopilotOperations : IOperationHandler, IAsyncDisposable
 
     private sealed class Worker : IDisposable
     {
-        internal Worker(AgentTask task, CancellationToken lifetime)
+        private readonly CancellationTokenRegistration _deviceRegistration;
+        internal Worker(AgentTask task, CancellationToken lifetime, CancellationToken deviceLifetime)
         {
             Task = task;
             Cancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
             Token = Cancellation.Token;
+            _deviceRegistration = deviceLifetime.Register(() => Cancel("device_access_disabled"));
             Cancellation.CancelAfter(task.Deadline - DateTimeOffset.UtcNow > TimeSpan.Zero ?
                 task.Deadline - DateTimeOffset.UtcNow : TimeSpan.Zero);
         }
@@ -655,6 +723,7 @@ public sealed class CopilotOperations : IOperationHandler, IAsyncDisposable
         }
         public void Dispose()
         {
+            _deviceRegistration.Dispose();
             lock (_gate)
             {
                 if (_disposed) return;
@@ -681,37 +750,4 @@ public sealed class CopilotOperations : IOperationHandler, IAsyncDisposable
         int TimeoutSeconds, string? WorkingDirectory = null, bool Unattended = false, double? MaxAiCredits = null,
         bool AllowWorkspaceRead = false, bool AllowWorkspaceWrite = false, string[]? ApprovedCommands = null);
 
-    private static IReadOnlyList<ToolDefinition> CreateTools()
-    {
-        const string session = "\"sessionId\":{\"type\":\"string\",\"maxLength\":128}";
-        const string task = "\"taskId\":{\"type\":\"string\",\"maxLength\":128}";
-        const string directory = "\"workingDirectory\":{\"type\":\"string\",\"maxLength\":4096}";
-        static ToolDefinition Tool(string name, string description, string properties, bool mutating, params string[] required)
-        {
-            using var schema = JsonDocument.Parse("{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" + properties +
-                "},\"required\":" + JsonSerializer.Serialize(required) + "}");
-            return new(name, description, schema.RootElement.Clone(), mutating, Capability);
-        }
-        return [
-            Tool("agent_list_sessions", "List this peer's broker-owned or explicitly attached agent sessions.", "", false),
-            Tool("agent_start_session", "Create a managed session, or explicitly resume a stored sessionId.", directory + "," + session, true),
-            Tool("agent_attach_session", "Opt in to a locally registered compatible interactive runtime; never accepts endpoints or tokens.",
-                "\"registrationId\":{\"type\":\"string\",\"maxLength\":128}," + session, true, "registrationId", "sessionId"),
-            Tool("agent_detach_session", "Detach an idle session without stopping a user-owned CLI.", session, true, "sessionId"),
-            Tool("agent_send", "Durably accept one human-granted task; returns immediately. Unattended work requires an explicit soft credit limit.",
-                session + "," + directory + """
-                ,"prompt":{"type":"string","maxLength":32768},"idempotencyKey":{"type":"string","maxLength":128},
-                "timeoutSeconds":{"type":"integer","minimum":1,"maximum":86400},"unattended":{"type":"boolean","default":false},
-                "maxAiCredits":{"type":"number","exclusiveMinimum":0},"allowWorkspaceRead":{"type":"boolean","default":false},
-                "allowWorkspaceWrite":{"type":"boolean","default":false},
-                "approvedCommands":{"type":"array","maxItems":16,"items":{"type":"string","maxLength":1024}}
-                """, true, "sessionId", "prompt", "idempotencyKey", "timeoutSeconds"),
-            Tool("agent_get_task", "Retrieve durable state, grant, result, and error of an owned task.", task, false, "taskId"),
-            Tool("agent_read_events", "Read bounded final-answer/tool/status events after a cursor; never model reasoning.",
-                task + ",\"afterCursor\":{\"type\":\"integer\",\"minimum\":0},\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":200}", false, "taskId"),
-            Tool("agent_cancel_task", "Request cancellation only of this broker's delegated turn; poll for confirmed outcome.", task, true, "taskId"),
-            Tool("agent_answer_question", "Answer an existing normal question only; cannot approve permissions, credentials, or budgets.",
-                task + ",\"questionId\":{\"type\":\"string\"},\"answer\":{\"type\":\"string\",\"maxLength\":8192}", true, "taskId", "questionId", "answer")
-        ];
-    }
 }

@@ -241,21 +241,19 @@ await Test("paired mutual TLS carries a real framed RPC exchange", async () =>
     }
     finally { listener.Stop(); }
 });
-await Test("human consent requires a human answer and isolates desktop owners", async () =>
+await Test("device access grants immediately and isolates desktop owners", async () =>
 {
     var consent = new HumanConsent();
     consent.SetConnected(true);
     OperationContext.ActorId.Value = "actor-a";
     var request = consent.RequestAsync(new("desktop-control", "test"), default);
-    var pending = await consent.Requests.ReadAsync();
-    Check(!request.IsCompleted && !consent.DesktopAllowed, "Permission was automatically granted.");
-    pending.Answer.TrySetResult(true);
-    Check(await request && consent.DesktopAllowed && consent.ObservationAllowed, "Human permission was not applied.");
+    Check(await request && consent.DesktopAllowed && consent.ObservationAllowed && !consent.Requests.TryRead(out _),
+        "Enabled device did not authorize without an approval.");
     consent.SetPrompting(true);
     Check(!consent.DesktopAllowed && !consent.ObservationAllowed, "Desktop access enabled during human approval UI.");
     consent.SetPrompting(false);
     OperationContext.ActorId.Value = "actor-b";
-    Check(!consent.DesktopAllowed && !consent.ObservationAllowed, "Another actor inherited desktop grants.");
+    Check(!consent.DesktopAllowed && consent.ObservationAllowed, "Another actor inherited input control or could not observe.");
     await Throws<AgentLinkException>(() => { consent.ReleaseDesktop(); return Task.CompletedTask; });
     await Throws<AgentLinkException>(() => consent.RequestAsync(new("desktop-control", "test"), default));
     consent.SetConnected(false);
@@ -263,17 +261,16 @@ await Test("human consent requires a human answer and isolates desktop owners", 
     OperationContext.ActorId.Value = "actor-a";
     Check(!consent.DesktopAllowed, "Reconnect restored an old desktop lease.");
 });
-await Test("disconnect invalidates even an already answered pending approval", async () =>
+await Test("disconnect invalidates authorization epochs without queuing approval", async () =>
 {
     var consent = new HumanConsent();
     consent.SetConnected(true);
     OperationContext.ActorId.Value = "pending-actor";
-    var approval = consent.RequestAsync(new("observe", "test"), default);
-    var pending = await consent.Requests.ReadAsync();
+    Check(await consent.RequestAsync(new("observe", "test"), default), "Observation was not automatic.");
+    var epoch = consent.DesktopAccessLifetime;
     consent.SetConnected(false);
     consent.SetConnected(true);
-    pending.Answer.TrySetResult(true);
-    Check(!await approval, "A stale approval survived connection replacement.");
+    Check(epoch.IsCancellationRequested && !consent.Requests.TryRead(out _), "Old work survived connection replacement.");
 });
 await Test("secured pipe validates the actual connecting Windows session", async () =>
 {
@@ -287,6 +284,7 @@ await Test("secured pipe validates the actual connecting Windows session", async
     Check(PipeSecurity.VerifyLocalSession(server) == (uint)Environment.ProcessId, "Wrong IPC process identity.");
 });
 await BackendTests.RunAsync(Test);
+await BackendTests.RunDesktopAvailabilityAsync(Test);
 Console.WriteLine($"All {passed} core/security tests passed.");
 return 0;
 

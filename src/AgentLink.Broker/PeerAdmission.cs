@@ -12,7 +12,9 @@ internal static class PeerAdmission
         {
             if (!EndpointIdentity.IsCertificateCurrent(certificate, DateTime.UtcNow))
                 throw new AuthenticationException("The channel certificate has expired or is not valid yet.");
-            register(EndpointIdentity.MatchesPinnedCertificate(certificate, currentPins(), DateTime.UtcNow));
+            // This entry point is only used inside same-logon DVC/WTS transport.
+            // TLS verifies key possession; persisted fingerprint pins are not authorization.
+            register(true);
         }
     }
 

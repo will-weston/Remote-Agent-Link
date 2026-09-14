@@ -25,27 +25,14 @@ lifetime.Quitting = false;
 lifetime.SessionEnding = true;
 Check(lifetime.RequestClose() == CloseAction.Close, "Windows logoff must not be vetoed.");
 lifetime.SessionEnding = false;
-lifetime.ApprovalActive = true;
-Check(lifetime.IsPrompting && lifetime.CanAllow, "A pending human approval protects operations.");
-Check(!lifetime.TryReleaseApproval(false) && lifetime.ApprovalActive, "Visible protected surfaces cannot release approval.");
+Check(!lifetime.IsPrompting, "The shell has no approval state or background prompt.");
 lifetime.EnterDialog();
 lifetime.EnterDialog();
-Check(lifetime.IsPrompting && !lifetime.CanAllow, "Nested modal UI blocks approval release.");
-Check(!lifetime.TryReleaseApproval(true), "Even a hidden main window cannot release approval behind a protected dialog.");
+Check(lifetime.IsPrompting && lifetime.DialogDepth == 2, "Nested local settings dialogs protect desktop operations.");
 lifetime.ExitDialog();
-Check(lifetime.IsPrompting && !lifetime.CanAllow, "One remaining dialog still blocks release.");
+Check(lifetime.IsPrompting, "One remaining settings dialog remains protected.");
 lifetime.ExitDialog();
-Check(lifetime.CanAllow, "Only after all dialogs close may a human decision be released.");
-lifetime.SessionEnding = true;
-Check(!lifetime.TryReleaseApproval(true), "Logoff cannot release a pending approval.");
-lifetime.SessionEnding = false;
-Check(lifetime.TryReleaseApproval(true) && !lifetime.IsPrompting, "Only hidden, non-modal UI can release the human decision.");
-lifetime.ApprovalActive = true;
-lifetime.Quitting = true;
-Check(!lifetime.CanAllow, "Shutdown cannot release approval.");
-lifetime.Quitting = false;
-lifetime.ApprovalActive = false;
-Check(!lifetime.IsPrompting && !lifetime.CanAllow, "No pending request cannot be approved.");
+Check(!lifetime.IsPrompting, "Protection is released only after all modal settings dialogs close.");
 try { lifetime.ExitDialog(); throw new Exception("Dialog underflow accepted."); }
 catch (InvalidOperationException) { checks++; }
 
@@ -149,10 +136,10 @@ foreach (var here in new[] { false, true })
 foreach (var there in new[] { false, true })
 {
     var peer = new PeerViewModel(new("id", "Laptop", new string('A', 64), 2, PeerDirection.RemoteDesktop, status, here, there, DateTimeOffset.UtcNow));
-    var ready = status == PeerConnectionStatus.Connected && here && there;
-    Check(peer.IsReady == ready, "A channel is not operational without both trust directions.");
-    Check(peer.StatusGlyph == (ready ? "\uE73E" : "\uE946"), "Success icon must match actual pairing state.");
-    Check(peer.NeedsVerification == !here, "Local verification is distinct from remote verification.");
+    var ready = status == PeerConnectionStatus.Connected;
+    Check(peer.IsReady == ready, "Connected RDP channels do not require saved pairing flags.");
+    Check(peer.StatusGlyph == (ready ? "\uE73E" : "\uE946"), "The check mark reflects actual channel state.");
+    Check(!peer.Status.Contains("approval") && !peer.Status.Contains("Paired"), "Channel status has no approval or pairing instructions.");
 }
 Check(PeerViewModel.FriendlyName("\u202Epretend\u0000\u2066").Equals("pretend", StringComparison.Ordinal), "Untrusted names cannot contain bidi/control formatting.");
 Check(PeerViewModel.FriendlyName("") == "Windows device", "Missing friendly names have a useful fallback.");
@@ -164,13 +151,13 @@ var bound = new ConnectionInfo("actual-fingerprint:logon-connection-id", outgoin
 Check(new PeerViewModel(outgoing, [bound]).McpConnectionId == bound.ConnectionId, "MCP binding uses the actual ConnectionInfo ID, not the transient peer ID.");
 Check(new PeerViewModel(outgoing, [bound]).CanCopyMcpConfiguration, "A uniquely matched ready outgoing device offers contextual configuration.");
 Check(new PeerViewModel(outgoing, [bound]).McpDetails.Contains(bound.ConnectionId) &&
-    !new PeerViewModel(outgoing, [bound]).McpDetails.Contains(outgoing.Id), "Pairing details must not label a transient channel ID as an MCP binding ID.");
+    !new PeerViewModel(outgoing, [bound]).McpDetails.Contains(outgoing.Id), "Connection details must not label a transient channel ID as an MCP binding ID.");
 Check(!new PeerViewModel(outgoing).CanCopyMcpConfiguration, "Missing outgoing target cannot offer guessed configuration.");
 Check(!new PeerViewModel(outgoing, [bound with { RemoteSessionId = 8 }]).CanCopyMcpConfiguration, "Target matching requires the exact remote session.");
-Check(!new PeerViewModel(outgoing, [bound with { PeerFingerprint = new string('B', 64) }]).CanCopyMcpConfiguration, "Target matching requires the paired fingerprint.");
+Check(!new PeerViewModel(outgoing, [bound with { PeerFingerprint = new string('B', 64) }]).CanCopyMcpConfiguration, "Target matching requires the exact endpoint fingerprint.");
 Check(!new PeerViewModel(outgoing, [bound, bound with { ConnectionId = "another-logon" }]).CanCopyMcpConfiguration, "Ambiguous targets must not be silently selected.");
-Check(!new PeerViewModel(outgoing with { TrustedRemotely = false }, [bound]).CanCopyMcpConfiguration, "Remote trust is required before contextual binding.");
-Check(!new PeerViewModel(outgoing with { TrustedLocally = false }, [bound]).CanCopyMcpConfiguration, "Local trust is required before contextual binding.");
+Check(new PeerViewModel(outgoing with { TrustedRemotely = false }, [bound]).CanCopyMcpConfiguration, "Saved remote pairing is not needed for contextual binding.");
+Check(new PeerViewModel(outgoing with { TrustedLocally = false }, [bound]).CanCopyMcpConfiguration, "Saved local pairing is not needed for contextual binding.");
 Check(!new PeerViewModel(outgoing with { Status = PeerConnectionStatus.Connecting }, [bound]).CanCopyMcpConfiguration, "Connecting is not ready for contextual binding.");
 var incoming = new PeerViewModel(outgoing with { Direction = PeerDirection.IncomingAgent }, [bound]);
 Check(incoming.CanCopyMcpConfiguration && incoming.McpConnectionId is null && incoming.McpDetails.Contains("--current-session"),
@@ -182,8 +169,8 @@ var unresolved = new PeerViewModel(outgoing with
 });
 Check(unresolved.Direction.Contains("Windows session unknown") && !unresolved.Direction.Contains("session 0"),
     "Unlearned session metadata is not described as the system's real Session 0.");
-Check(!unresolved.CanReviewPairing && unresolved.ActionLabel == "Waiting for device identity",
-    "Pairing is not offered before a certificate fingerprint is learned.");
+Check(!unresolved.IsReady && !unresolved.CanCopyMcpConfiguration,
+    "Unresolved channels offer neither a ready check mark nor a guessed MCP target.");
 Check(unresolved.ConnectedSince.StartsWith("Connection attempt started", StringComparison.Ordinal),
     "A connecting channel is not falsely described as already opened.");
 var legacyIncoming = new PeerViewModel(outgoing with { Direction = PeerDirection.IncomingAgent, SessionId = 0 }, [bound]);
@@ -205,6 +192,7 @@ try { McpConfiguration.Create(McpTarget.FixedConnection, " "); throw new Excepti
 catch (ArgumentException) { checks++; }
 
 var shell = new ShellViewModel();
+Check(shell.DesktopAccessEnabled, "Device access defaults to Yes.");
 shell.Update([outgoing], true, null, false);
 Check(!shell.Peers[0].CanCopyMcpConfiguration, "A channel can precede the actual MCP connection.");
 shell.Update([outgoing], true, null, false, [bound]);
@@ -215,23 +203,22 @@ shell.Update([], true, null, false);
 Check(shell.IsEmpty && shell.Headline == "Ready when you are", "Waiting state is friendly and truthful.");
 shell.Update([], false, null, false);
 Check(shell.Headline == "Broker is not running", "Listener failures must not appear as readiness.");
-shell.HasApproval = true;
-shell.Update([], true, null, false);
-Check(shell.Headline == "Your approval is needed", "Approval is visible on the dashboard.");
-shell.HasApproval = false;
 shell.Update([], true, "Channel unavailable", true);
-Check(shell.Summary.Contains("Channel unavailable") && shell.DesktopStatus.Contains("active"), "Transport and permission states are independently reported.");
+Check(shell.Summary.Contains("Channel unavailable") && shell.DesktopStatus.Contains("holds mouse"),
+    "Transport status and exclusive input ownership are independently reported.");
+Check(shell.NoAgents && shell.AgentCount == "No agents connected", "A control lease alone is not proof of connected MCP agents.");
 shell.Notice = "Copied.";
 Check(shell.HasNotice, "Status announcements follow notices.");
 shell.Notice = "";
 Check(!shell.HasNotice, "Empty status notices are hidden.");
 shell.Update([], true, null, false, desktopAccessEnabled: false);
-Check(!shell.DesktopAccessEnabled && shell.DesktopStatus.Contains("Blocked on this PC"), "The off state explicitly identifies its local desktop scope.");
+Check(!shell.DesktopAccessEnabled && shell.DesktopStatus.Contains("blocked on this device"), "The off state identifies all agent access on this device.");
 shell.Update([], true, null, false, desktopAccessEnabled: true);
-Check(shell.DesktopAccessEnabled && shell.DesktopStatus.Contains("needs your approval"), "Enabling requests does not claim a control grant.");
+Check(shell.DesktopAccessEnabled && shell.DesktopStatus.Contains("allowed on this device"), "Yes allows access without asking for approval.");
 shell.DesktopAccessEnabled = false;
 shell.ShowDesktopBlockNotice();
-Check(shell.HasNotice && shell.Notice.Contains("desktop access"), "The tray notice explicitly identifies desktop access.");
+Check(shell.HasNotice && shell.Notice.Contains("Agent access") && shell.Notice.Contains("cancelled") &&
+    shell.Notice.Contains("RDP stays connected"), "The tray notice describes broad access blocking without disconnecting RDP.");
 shell.Update([], true, null, false, desktopAccessEnabled: false);
 Check(shell.HasNotice, "An unchanged blocked state retains its notice.");
 shell.Update([], true, null, false, desktopAccessEnabled: true);
@@ -247,6 +234,30 @@ shell.ShowDesktopBlockNotice();
 shell.Notice = "";
 shell.DesktopAccessEnabled = true;
 Check(!shell.HasNotice, "A dismissed block notice does not return after re-enabling.");
+
+shell.Update([outgoing], true, null, false, [bound]);
+Check(shell.NoAgents && shell.Agents.Count == 0, "An RDP computer does not imply an agent is connected.");
+var localAgent = new AgentConnectionSnapshot("local-process", "This PC", true, DateTimeOffset.UnixEpoch);
+var remoteAgent = new AgentConnectionSnapshot("remote-process", "Work laptop", false, DateTimeOffset.UnixEpoch);
+shell.Update([outgoing], true, null, false, [bound], agents: [localAgent, remoteAgent]);
+Check(!shell.NoAgents && shell.AgentCount == "2 agents connected", "Each actual MCP connection contributes to agent count.");
+Check(shell.Agents.Any(agent => agent.IsLocal && agent.Description.Contains("This computer")) &&
+    shell.Agents.Any(agent => !agent.IsLocal && agent.Description.Contains("From Work laptop")),
+    "Agent origins distinguish same-session MCP from another computer.");
+Check(shell.Agents.All(agent => agent.Description.StartsWith("MCP agent", StringComparison.Ordinal)),
+    "Unknown agent product identity is not invented from Copilot configuration.");
+var firstAgentRow = shell.Agents[0];
+shell.Update([outgoing], true, null, false, [bound], agents: [localAgent with { LastSeenAt = DateTimeOffset.UtcNow }, remoteAgent]);
+Check(ReferenceEquals(firstAgentRow, shell.Agents[0]), "Heartbeat refreshes do not destroy focused agent rows.");
+shell.Update([outgoing], true, null, false, [bound], desktopAccessEnabled: false, agents: [localAgent, remoteAgent]);
+Check(shell.Peers[0].IsReady && shell.Agents.Count == 2,
+    "Blocking actions does not falsely mark RDP computers or still-connected MCP clients disconnected.");
+shell.Update([outgoing], true, null, false, [bound], agents: [remoteAgent]);
+Check(shell.Agents.Count == 1 && shell.AgentCount == "1 agent connected", "Disconnected or expired agents disappear on the next snapshot.");
+shell.Update([], false, null, false, agents: [remoteAgent]);
+Check(shell.NoAgents && shell.Agents.Count == 0, "Stopped broker cannot display stale agent presence.");
+Check(new AgentConnectionViewModel(remoteAgent with { ComputerName = "\u202EWork\u0000" }).ComputerName == "Work",
+    "Untrusted agent origin labels receive the same bidi and control character filtering as computers.");
 
 var mcpSetupDirectory = Path.Combine(AppContext.BaseDirectory, "mcp-setup-" + Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(mcpSetupDirectory);
@@ -307,5 +318,5 @@ foreach (var terminal in new[] { "completed", "failed", "cancelled", "interrupte
 Check(!ActivityViewModel.IsTerminal("cancelling"), "Cancellation request is not confused with terminal outcome.");
 
 PluginLoadingTests.Run(Check);
-
-Console.WriteLine($"All {checks} broker presentation/lifecycle assertions passed (no UI, trust or live broker modified).");
+UiLayoutTests.Run(Check);
+Console.WriteLine($"All {checks} broker presentation/lifecycle checks passed (no installed UI, trust or live broker modified).");

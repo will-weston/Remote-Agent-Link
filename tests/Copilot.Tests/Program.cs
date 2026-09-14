@@ -17,9 +17,12 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Disconnected local Control UI lists and cancels peer-owned tasks", LocalControl),
     ("Undispatched local cancellation survives broker restart", DurableCancellation),
     ("Finite timeout is enforced", Timeout),
-    ("New permissions wait offline and cannot be answered remotely", PermissionWaiting),
+    ("Out-of-scope permissions fail without dialogs or reconnect replay", PermissionWaiting),
     ("Managed policy is never preapproved", ManagedPolicy),
-    ("Disconnected approval epochs reject late consent", ConsentEpoch),
+    ("Unknown permissions cannot invoke an approval handler", ConsentEpoch),
+    ("Device off blocks all coding APIs and cancels broker-owned work", DeviceAccess),
+    ("Device No during acceptance cannot strand a committed task", DeviceAccessDuringAcceptance),
+    ("Channel loss cancels only its principal's attended work", PrincipalDisconnect),
     ("Usage accounting is durable and deduplicated", UsageAccounting),
     ("Normal questions survive disconnect and enforce choice schema", Questions),
     ("Unknown dispatch outcome is never retried", UnknownOutcome),
@@ -33,9 +36,9 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Busy live turns reject surprise injection; detach preserves CLI", LiveOwnership),
     ("Production live adapter fails closed without contacting endpoint", LiveCompatibility),
     ("Canonical workspace and command grants fail closed", Policy),
-    ("Consent denial and actor isolation", ConsentAndOwnership),
+    ("Endpoint policy denial and actor isolation", ConsentAndOwnership),
     ("One broker writer owns the store", StoreLease),
-    ("Managed resume requires human authorization", Resume),
+    ("Managed resume obeys endpoint authorization", Resume),
     ("Unconfigured production runtime cannot launch", RuntimeConfiguration),
     ("MCP cannot submit connection endpoints, tokens or permission answers", ToolSchemas)
 };
@@ -236,10 +239,9 @@ static async Task PermissionWaiting()
     fixture.Connection(false);
     int before = fixture.Consent.Requests.Count;
     var permission = fixture.Runtime.Permission(new("shell", "Other command", Command: "other", PossiblePaths: []));
-    await fixture.State(id, "waiting_for_approval");
-    Check(!permission.IsCompleted && fixture.Consent.Requests.Count == before, "deferred without disconnected consent");
+    Check(!await permission && fixture.Consent.Requests.Count == before, "out-of-scope permission must be denied without approval");
     fixture.Connection(true);
-    Check(await permission.WaitAsync(TimeSpan.FromSeconds(2)), "reconnected human approval");
+    Check(!await permission && fixture.Consent.Requests.Count == before, "reconnect replayed denied permission");
     await Error("question_not_found", () => fixture.Call("agent_answer_question", new { taskId = id, questionId = "permission", answer = "approve" }));
     fixture.Runtime.Finish();
     await fixture.State(id, "completed");
@@ -254,7 +256,7 @@ static async Task ManagedPolicy()
     var count = fixture.Consent.Requests.Count;
     fixture.Consent.Allow = false;
     bool result = await fixture.Runtime.Permission(new("read", "Enterprise approval", Path.Combine(fixture.Workspace, "code.cs"), ManagedApprovalRequired: true));
-    Check(!result && fixture.Consent.Requests.Count == count + 1, "managed approval never automatically granted");
+    Check(!result && fixture.Consent.Requests.Count == count, "managed approval was granted or prompted");
     fixture.Runtime.Finish();
     await fixture.State(id, "completed");
 }
@@ -269,15 +271,141 @@ static async Task ConsentEpoch()
     int calls = 0;
     fixture.Consent.Handler = (_, _) => Interlocked.Increment(ref calls) == 1 ? delayed.Task : Task.FromResult(true);
     var permission = fixture.Runtime.Permission(new("unknown", "New approval"));
-    await Until(() => calls == 1);
+    Check(!await permission && calls == 0, "Unknown permission reached approval handler.");
     fixture.Connection(false);
     delayed.TrySetResult(true);
     await Task.Delay(30);
-    Check(!permission.IsCompleted, "late approval from disconnected epoch rejected");
+    Check(!await permission, "Late approval changed a denied permission.");
     fixture.Connection(true);
-    Check(await permission.WaitAsync(TimeSpan.FromSeconds(2)) && calls == 2, "fresh human consent after reconnect");
+    Check(!await permission && calls == 0, "Reconnect retried a denied permission.");
     fixture.Runtime.Finish();
     await fixture.State(id, "completed");
+}
+
+static async Task DeviceAccess()
+{
+    await using var fixture = new Fixture();
+    var session = await fixture.Start();
+    var arguments = fixture.SendArguments(session, "device-off", true);
+    var id = (await fixture.Call("agent_send", arguments)).GetProperty("taskId").GetString()!;
+    var runtime = fixture.Runtime;
+    await Until(() => runtime.Sends == 1 &&
+        fixture.Operations.GetLocalTask(id).MessageId is not null);
+    fixture.Consent.SetDeviceAccess(false);
+    fixture.Operations.OnDeviceAccessChanged(false);
+    foreach (var tool in fixture.Operations.Tools)
+        await Error("device_access_disabled", () => fixture.Call(tool.Name, new { }));
+    await Until(() => TaskStates.Terminal(fixture.Operations.GetLocalTask(id).State));
+    var cancelled = fixture.Operations.GetLocalTask(id);
+    Check(cancelled.State == "cancelled" && cancelled.ErrorCode == "device_access_disabled" &&
+        cancelled.CancellationRequested && runtime.Aborts == 1 && runtime.LastAbort == "message-1" &&
+        runtime.ExternalStops == 0, "Device No must cancel only the owned turn, including unattended work.");
+    Check(fixture.Operations.ListLocalTasks().Single().TaskId == id, "Local human metadata unavailable while off.");
+    fixture.Consent.SetDeviceAccess(true);
+    fixture.Operations.OnDeviceAccessChanged(true);
+    var replay = await fixture.Call("agent_send", arguments);
+    Check(replay.GetProperty("taskId").GetString() == id && runtime.Sends == 1 &&
+        replay.GetProperty("state").GetString() == "cancelled", "Re-enable replayed a cancelled task.");
+    var next = await fixture.Send(session, "fresh-after-on");
+    await Until(() => runtime.Sends == 2);
+    runtime.Finish();
+    await fixture.State(next, "completed");
+
+    // Exercise the acceptance boundary when an authorization epoch changes
+    // while the adapter's policy check is completing.
+    var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+    fixture.Consent.Handler = (_, _) => { entered.TrySetResult(); return release.Task; };
+    var pending = fixture.Send(session, "cancel-before-accept");
+    await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+    fixture.Consent.SetDeviceAccess(false);
+    fixture.Operations.OnDeviceAccessChanged(false);
+    fixture.Consent.SetDeviceAccess(true);
+    fixture.Operations.OnDeviceAccessChanged(true);
+    release.TrySetResult(true);
+    try { await pending; throw new Exception("An old request survived an Off/On epoch."); }
+    catch (OperationCanceledException) { }
+    Check(runtime.Sends == 2 && fixture.Operations.ListLocalTasks().Count == 2,
+        "A cancelled pre-acceptance request was accepted or replayed.");
+    fixture.Consent.Handler = null;
+    Register(fixture);
+    await fixture.Call("agent_attach_session", new { registrationId = "human", sessionId = "live" });
+    var external = fixture.Runtime;
+    var externalTask = await fixture.Send("live", "external-owned");
+    await Until(() => fixture.Operations.GetLocalTask(externalTask).MessageId is not null);
+    fixture.Consent.SetDeviceAccess(false);
+    fixture.Operations.OnDeviceAccessChanged(false);
+    await Until(() => TaskStates.Terminal(fixture.Operations.GetLocalTask(externalTask).State));
+    Check(external.Aborts == 1 && external.LastAbort == "message-1" && external.ExternalStops == 0 &&
+        external.Disposals == 0, "Device No killed or disposed an external user session instead of cancelling only its owned turn.");
+}
+
+static async Task DeviceAccessDuringAcceptance()
+{
+    await using var fixture = new Fixture();
+    var session = await fixture.Start();
+    var store = typeof(CopilotOperations).GetField("_store",
+        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)?.GetValue(fixture.Operations)
+        as TaskStore ?? throw new InvalidOperationException("Task store is unavailable.");
+    var database = typeof(TaskStore).GetField("_connection",
+        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)?.GetValue(store)
+        as SqliteConnection ?? throw new InvalidOperationException("Task writer is unavailable.");
+    database.CreateFunction("disable_device_during_acceptance", () =>
+    {
+        fixture.Consent.SetDeviceAccess(false);
+        return 1;
+    });
+    using (var command = database.CreateCommand())
+    {
+        command.CommandText = """
+            CREATE TRIGGER disable_during_acceptance AFTER INSERT ON tasks
+            WHEN NEW.idempotency_key = 'acceptance-race'
+            BEGIN SELECT disable_device_during_acceptance(); END;
+            """;
+        command.ExecuteNonQuery();
+    }
+    var accepted = await fixture.Call("agent_send", fixture.SendArguments(session, "acceptance-race", true));
+    var id = accepted.GetProperty("taskId").GetString()!;
+    await Until(() => TaskStates.Terminal(fixture.Operations.GetLocalTask(id).State));
+    var cancelled = fixture.Operations.GetLocalTask(id);
+    Check(cancelled.State == "cancelled" && cancelled.ErrorCode == "device_access_disabled" &&
+        cancelled.CancellationRequested && !cancelled.DispatchStarted && fixture.Runtime.Sends == 0,
+        "No during commit left accepted work stranded or dispatched without access.");
+    fixture.Consent.SetDeviceAccess(true);
+    fixture.Operations.OnDeviceAccessChanged(true);
+    var next = await fixture.Send(session, "after-acceptance-race");
+    await Until(() => fixture.Runtime.Sends == 1);
+    fixture.Runtime.Finish();
+    await fixture.State(next, "completed");
+}
+
+static async Task PrincipalDisconnect()
+{
+    await using var fixture = new Fixture();
+    var localSession = await fixture.Start();
+    var localTask = await fixture.Send(localSession, "local");
+    var localRuntime = fixture.Runtime;
+    var remoteSession = (await fixture.Call("agent_start_session", new { workingDirectory = fixture.Workspace },
+        owner: "remote-principal")).GetProperty("sessionId").GetString()!;
+    var remoteTask = (await fixture.Call("agent_send", fixture.SendArguments(remoteSession, "remote"),
+        owner: "remote-principal")).GetProperty("taskId").GetString()!;
+    var remoteRuntime = fixture.Runtime;
+    await Until(() => localRuntime.Sends == 1 && remoteRuntime.Sends == 1 &&
+        fixture.Operations.GetLocalTask(remoteTask).MessageId is not null);
+    fixture.Operations.OnPrincipalDisconnected("remote-principal");
+    await Until(() => fixture.Operations.GetLocalTask(remoteTask).State == "interrupted");
+    Check(remoteRuntime.Aborts == 1 && localRuntime.Aborts == 0 &&
+        fixture.Operations.GetLocalTask(localTask).State == "running", "A remote disconnect cancelled local independent work.");
+    await Error("disconnected", () => fixture.Call("agent_send", fixture.SendArguments(remoteSession, "stale"),
+        owner: "remote-principal"));
+    fixture.Operations.OnPrincipalConnected("remote-principal");
+    var fresh = (await fixture.Call("agent_send", fixture.SendArguments(remoteSession, "fresh"),
+        owner: "remote-principal")).GetProperty("taskId").GetString()!;
+    await Until(() => remoteRuntime.Sends == 2);
+    remoteRuntime.Finish();
+    localRuntime.Finish();
+    await Until(() => fixture.Operations.GetLocalTask(fresh).State == "completed");
+    await fixture.State(localTask, "completed");
 }
 
 static async Task UsageAccounting()
@@ -291,12 +419,12 @@ static async Task UsageAccounting()
     fixture.Runtime.Usage("usage-2", 5678);
     fixture.Runtime.Usage("bad", double.NaN);
     fixture.Runtime.BudgetExhausted(5.2);
-    var waiting = await fixture.State(id, "waiting_for_approval");
+    var waiting = await fixture.State(id, "failed");
     Check(waiting.GetProperty("observedNanoAiu").GetDouble() == 6912 &&
         waiting.GetProperty("creditWindowUsed").GetDouble() == 5.2, "observed usage kept in native SDK units and credits");
     await Error("question_not_found", () => fixture.Call("agent_answer_question", new { taskId = id, questionId = "budget", answer = "increase" }));
-    fixture.Runtime.Finish();
-    await fixture.State(id, "completed");
+    Check(waiting.GetProperty("errorCode").GetString() == "budget_exhausted" && fixture.Runtime.Aborts == 1,
+        "Budget exhaustion must stop owned work, not queue approval or increase the limit.");
     await fixture.Operations.DisposeAsync();
     fixture.Operations = new CopilotOperations(fixture.Consent, fixture.Data, fixture.Factory);
     var persisted = await fixture.Call("agent_get_task", new { taskId = id });
@@ -735,6 +863,21 @@ sealed class Fixture : IAsyncDisposable
 sealed class FakeConsent : IConsentService
 {
     public bool IsConnected { get; set; } = true;
+    public bool DeviceAccessEnabled { get; private set; } = true;
+    private CancellationTokenSource _deviceEpoch = new();
+    public CancellationToken DeviceAccessLifetime => DeviceAccessEnabled ? _deviceEpoch.Token :
+        throw new AgentLinkException("device_access_disabled", "Synthetic device access is disabled.");
+    internal void SetDeviceAccess(bool enabled)
+    {
+        DeviceAccessEnabled = enabled;
+        if (!enabled)
+        {
+            var old = _deviceEpoch;
+            _deviceEpoch = new();
+            old.Cancel();
+            old.Dispose();
+        }
+    }
     public bool DesktopAllowed { get; set; }
     internal bool Allow = true;
     internal Func<ConsentRequest, CancellationToken, Task<bool>>? Handler;

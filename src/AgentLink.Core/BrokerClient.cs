@@ -4,8 +4,24 @@ using System.Text.Json.Serialization;
 namespace AgentLink.Core;
 
 public sealed record ConnectionInfo(
-    string ConnectionId, string PeerFingerprint, int RemoteSessionId, string LogonId, string Epoch,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? DisplayName = null);
+    string ConnectionId, string? PeerFingerprint, int? RemoteSessionId, string? LogonId, string Epoch,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? DisplayName = null,
+    string TargetKind = "remoteEndpoint", string State = "ready",
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? LocalSurfaceStatus = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ClientSurfaceInfo? LocalSurface = null);
+
+// Diagnostic service metadata only. Neither process ownership nor an HWND proves
+// a connection-specific operation destination or freshness of remote pixels.
+public sealed record ClientSurfaceInfo(
+    ulong Generation, string Status, int HResult, bool ProcessOwnershipVerified,
+    string? Hwnd, uint ClientProcessId, ulong ClientProcessStartTime, uint WindowsSessionId,
+    int RemoteWidth, int RemoteHeight, int ViewWidth, int ViewHeight, int ViewOffsetX, int ViewOffsetY,
+    float Scale, bool ConnectionIdentityVerified = false, bool BackgroundInputSupported = false,
+    bool FreshMinimizedCaptureSupported = false,
+    string BackgroundInputUnsupportedReason =
+        "Public acquisition of the existing connection's keyboard/mouse input object is unproven; global input is not supported.",
+    string FreshMinimizedCaptureUnsupportedReason =
+        "Fresh remote pixels while minimized are unproven; HWND capture cannot overcome client output suppression.");
 
 public sealed record EndpointHello(string ProtocolVersion, int SessionId, string LogonId,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? DisplayName = null,

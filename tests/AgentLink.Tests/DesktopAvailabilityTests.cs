@@ -3,224 +3,222 @@ using System.Text.Json;
 using AgentLink.Broker;
 using AgentLink.Broker.Shell;
 using AgentLink.Core;
+using AgentLink.Copilot;
 
 internal static partial class BackendTests
 {
-    private static async Task RunDesktopAvailabilityAsync(Func<string, Func<Task>, Task> test)
+    internal static async Task RunDesktopAvailabilityAsync(Func<string, Func<Task>, Task> test)
     {
-        await test("desktop availability defaults on but never grants approval or bypasses connection gates", async () =>
+        await test("device access defaults on and automatically permits observation and scoped coding", async () =>
         {
             var consent = new HumanConsent();
-            OperationContext.ActorId.Value = "desktop-default";
-            Check(consent.DesktopAccessEnabled && !consent.DesktopAllowed && !consent.ObservationAllowed,
-                "The default availability state granted permissions or changed compatibility.");
-            var approval = consent.RequestAsync(new("observe", "test"), default);
-            Check(!approval.IsCompleted && !consent.Requests.TryRead(out _), "Disconnected desktop approval bypassed connection readiness.");
+            OperationContext.ActorId.Value = "agent";
+            Check(consent.DeviceAccessEnabled && !consent.ObservationAllowed, "Unauthenticated context was admitted.");
+            await ThrowsCode("disconnected", () => consent.RequestAsync(new("observe", "test"), default));
             consent.SetConnected(true);
-            var pending = await consent.Requests.ReadAsync();
-            Check(!approval.IsCompleted && !consent.ObservationAllowed, "Connecting implicitly approved observation.");
-            pending.Answer.TrySetResult(true);
-            Check(await approval && consent.ObservationAllowed && !consent.DesktopAllowed, "Explicit observation approval was not isolated from control.");
+            foreach (var capability in new[] { "observe", "agent-delegation", "unattended-execution" })
+                Check(await consent.RequestAsync(new(capability, "test"), default), "Enabled capability required approval.");
+            Check(consent.ObservationAllowed && !consent.HasDesktopLease && !consent.Requests.TryRead(out _),
+                "Observation acquired input or populated an approval queue.");
         });
-        await test("desktop off immediately revokes observation and control without changing the connection", async () =>
+        await test("device off revokes all access and epochs without replay or input preemption", async () =>
         {
             var consent = new HumanConsent();
             consent.SetConnected(true);
-            OperationContext.ActorId.Value = "desktop-owner";
-            var approval = consent.RequestAsync(new("desktop-control", "test"), default);
-            (await consent.Requests.ReadAsync()).Answer.TrySetResult(true);
-            Check(await approval && consent.DesktopAllowed && consent.ObservationAllowed, "The desktop grant was not established.");
-            var oldLifetime = consent.DesktopAccessLifetime;
+            OperationContext.ActorId.Value = "first";
+            await consent.RequestAsync(new("desktop-control", "test"), default);
+            var desktop = consent.DesktopAccessLifetime;
+            var device = consent.DeviceAccessLifetime;
+            OperationContext.ActorId.Value = "second";
+            await ThrowsCode("desktop_busy", () => consent.RequestAsync(new("desktop-control", "test"), default));
+            await ThrowsCode("not_control_owner", () => { consent.ReleaseDesktop(); return Task.CompletedTask; });
             consent.SetDesktopAccessEnabled(false);
-            Check(!consent.DesktopAccessEnabled && !consent.DesktopAllowed && !consent.ObservationAllowed &&
-                !consent.HasDesktopLease && consent.IsConnected, "Off retained desktop authority or disconnected the channel.");
-            foreach (var capability in new[] { "observe", "desktop-control" })
-                await ThrowsCode("desktop_access_disabled", () => consent.RequestAsync(new(capability, "test"), default));
+            Check(desktop.IsCancellationRequested && device.IsCancellationRequested && !consent.HasDesktopLease &&
+                !consent.ObservationAllowed && consent.IsConnected, "Off retained access or disconnected transport.");
+            foreach (var capability in new[] { "observe", "desktop-control", "agent-delegation", "unattended-execution" })
+                await ThrowsCode("device_access_disabled", () => consent.RequestAsync(new(capability, "test"), default));
             consent.SetDesktopAccessEnabled(true);
-            using var delayedRequest = CancellationTokenSource.CreateLinkedTokenSource(default, oldLifetime);
-            Check(delayedRequest.IsCancellationRequested && !consent.DesktopAccessLifetime.IsCancellationRequested,
-                "An operation captured before Off reused the new On epoch.");
-            Check(!consent.DesktopAllowed && !consent.ObservationAllowed && !consent.HasDesktopLease,
-                "Re-enabling resurrected a prior lease.");
-            var fresh = consent.RequestAsync(new("desktop-control", "fresh"), default);
-            var pending = await consent.Requests.ReadAsync();
-            Check(!fresh.IsCompleted, "Re-enable skipped fresh human approval.");
-            pending.Answer.TrySetResult(true);
-            Check(await fresh && consent.DesktopAllowed, "Fresh human approval did not work after re-enable.");
+            Check(device.IsCancellationRequested && desktop.IsCancellationRequested && !consent.HasDesktopLease &&
+                !consent.DeviceAccessLifetime.IsCancellationRequested, "Re-enable replayed a revoked epoch or lease.");
+            await consent.RequestAsync(new("desktop-control", "fresh"), default);
+            Check(consent.DesktopAllowed, "Fresh input acquisition failed.");
             consent.SetPrompting(true);
-            Check(!consent.DesktopAllowed && !consent.ObservationAllowed, "Availability bypassed the prompting gate.");
+            Check(!consent.DesktopAllowed && !consent.ObservationAllowed, "Protected dialog guard was bypassed.");
             consent.SetPrompting(false);
-            OperationContext.ActorId.Value = "different-agent";
-            Check(!consent.DesktopAllowed && !consent.ObservationAllowed, "Availability bypassed actor ownership.");
+            Check(!consent.Requests.TryRead(out _), "An approval was queued.");
         });
-        await test("off then on invalidates queued answered and connection-waiting desktop approvals", async () =>
+        await test("revocation cancels a lock-blocked acquisition without restoring input ownership", async () =>
         {
-            var consent = new HumanConsent();
-            OperationContext.ActorId.Value = "desktop-race";
-            var waiting = consent.RequestAsync(new("observe", "waiting"), default);
-            consent.SetDesktopAccessEnabled(false);
-            consent.SetDesktopAccessEnabled(true);
-            consent.SetConnected(true);
-            Check(!await waiting.WaitAsync(TimeSpan.FromSeconds(2)) && !consent.Requests.TryRead(out _),
-                "A pre-Off connection-waiting request resumed after On.");
-            for (var iteration = 0; iteration < 40; iteration++)
+            foreach (var reconnect in new[] { false, true })
             {
-                var approval = consent.RequestAsync(new("desktop-control", "test"), default);
-                var pending = await consent.Requests.ReadAsync();
-                if ((iteration & 1) == 0)
-                    pending.Answer.TrySetResult(true);
-                consent.SetDesktopAccessEnabled(false);
-                consent.SetDesktopAccessEnabled(true);
-                pending.Answer.TrySetResult(true);
-                await approval;
-                Check(pending.Revoked && !consent.DesktopAllowed && !consent.ObservationAllowed && !consent.HasDesktopLease,
-                    "An old approval survived an Off/On epoch change.");
+                var consent = new HumanConsent();
+                consent.SetConnected(true);
+                var lifetime = consent.DesktopAccessLifetime;
+                var gate = typeof(HumanConsent).GetField("_gate", BindingFlags.Instance | BindingFlags.NonPublic)!
+                    .GetValue(consent)!;
+                var completed = new TaskCompletionSource<Exception?>(TaskCreationOptions.RunContinuationsAsynchronously);
+                var worker = new Thread(() =>
+                {
+                    OperationContext.ActorId.Value = "stale";
+                    try
+                    {
+                        consent.RequestAsync(new("desktop-control", "stale acquisition"), lifetime).GetAwaiter().GetResult();
+                        completed.SetResult(null);
+                    }
+                    catch (Exception exception) { completed.SetResult(exception); }
+                }) { IsBackground = true };
+                try
+                {
+                    lock (gate)
+                    {
+                        worker.Start();
+                        // Hold acquisition at its lock, after its initial cancellation check.
+                        Check(SpinWait.SpinUntil(() => (worker.ThreadState & ThreadState.WaitSleepJoin) != 0,
+                            TimeSpan.FromSeconds(5)), "Acquisition did not wait on the consent lock.");
+                        if (reconnect)
+                        {
+                            consent.SetConnected(false);
+                            consent.SetConnected(true);
+                        }
+                        else consent.RevokeDesktop();
+                    }
+                    var failure = await completed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                    Check(failure is OperationCanceledException && !consent.HasDesktopLease,
+                        "A revoked acquisition restored ownership instead of cancelling.");
+                    OperationContext.ActorId.Value = "fresh";
+                    Check(await consent.RequestAsync(new("desktop-control", "fresh acquisition"), consent.DesktopAccessLifetime) &&
+                        consent.DesktopAllowed, "Revoked acquisition blocked a fresh actor.");
+                }
+                finally
+                {
+                    Check(worker.Join(TimeSpan.FromSeconds(5)), "Acquisition worker did not stop.");
+                }
             }
         });
-        await test("desktop off preserves non-UI and unattended approvals and queue capacity", async () =>
-        {
-            var consent = new HumanConsent();
-            consent.SetConnected(true);
-            OperationContext.ActorId.Value = "mixed-agent";
-            var desktop = Enumerable.Range(0, 15)
-                .Select(_ => consent.RequestAsync(new("observe", "desktop"), default)).ToArray();
-            var delegation = consent.RequestAsync(new("agent-delegation", "non-UI delegation", Unattended: true), default);
-            consent.SetDesktopAccessEnabled(false);
-            Check((await Task.WhenAll(desktop)).All(answer => !answer), "Off did not invalidate queued desktop approvals.");
-            var retained = await consent.Requests.ReadAsync();
-            Check(retained.Request.Capability == "agent-delegation" && retained.Request.Unattended &&
-                !retained.Revoked && !delegation.IsCompleted && !consent.Requests.TryRead(out _),
-                "Off cancelled non-UI approval or retained stale desktop queue entries.");
-            retained.Answer.TrySetResult(true);
-            Check(await delegation && !consent.DesktopAllowed && !consent.ObservationAllowed,
-                "Off altered an independently approved non-UI capability.");
-            consent.SetDesktopAccessEnabled(true);
-            var fresh = consent.RequestAsync(new("observe", "fresh"), default);
-            var pending = await consent.Requests.ReadAsync();
-            Check(!fresh.IsCompleted, "Re-enable inherited observation from non-UI approval.");
-            pending.Answer.TrySetResult(false);
-            Check(!await fresh, "A declined fresh approval was granted.");
-        });
-        await test("desktop off preserves non-UI requests waiting for a connection", async () =>
-        {
-            var consent = new HumanConsent();
-            var delegation = consent.RequestAsync(new("agent-delegation", "waiting for connection"), default);
-            consent.SetDesktopAccessEnabled(false);
-            Check(!delegation.IsCompleted, "Off cancelled a non-UI connection wait.");
-            consent.SetConnected(true);
-            var pending = await consent.Requests.ReadAsync();
-            Check(pending.Request.Capability == "agent-delegation" && !delegation.IsCompleted, "Off approved non-UI work implicitly.");
-            pending.Answer.TrySetResult(true);
-            Check(await delegation && !consent.DesktopAccessEnabled, "Non-UI approval changed desktop availability.");
-        });
-        await test("desktop off keeps paired TLS and non-UI agent approvals alive while denying local and remote desktop calls", async () =>
+        await test("off rejects every desktop and coding category locally and remotely while metadata survives", async () =>
         {
             await using var local = new Fixture();
             await using var remote = new Fixture();
-            Pair(local, remote);
             local.Host.Start();
             remote.Host.Start();
             await using var pair = await HostPair.Connect(local.Host, remote.Host);
             await Wait(() => Connected(local.Host) && Connected(remote.Host));
             var binding = local.Host.Connections.Single();
             local.Session.SetDesktopAccessEnabled(false);
-            var outgoingApproval = local.Client.CallAsync("invoke", new RoutedOperation(binding.ConnectionId, false,
+            await local.Client.CallAsync("invoke", new RoutedOperation(binding.ConnectionId, false,
                 new("desktop.acquire", Json.Element(new { }), Guid.NewGuid().ToString("N"))), default);
-            var remoteApproval = await remote.Consent.Requests.ReadAsync();
-            Check(remoteApproval.Request.Capability == "desktop-control" && !outgoingApproval.IsCompleted,
-                "Turning off THIS desktop prevented independent approval on the other desktop.");
-            remoteApproval.Answer.TrySetResult(false);
-            await ThrowsCode("permission_denied", () => outgoingApproval);
-            var previousEpoch = DesktopOperationEpoch(remote.Host);
-            var delegation = LocalInvoke(remote, "agent_start_session", new { workingDirectory = remote.Workspace });
-            var nonUiApproval = await remote.Consent.Requests.ReadAsync();
-            Check(nonUiApproval.Request.Capability == "agent-delegation", "The non-UI request did not reach its own consent gate.");
-            var durable = SeedTask(remote, $"local:{WindowsLogon.Current}", "waiting_for_connection");
+            Check(remote.Consent.HasDesktopLease, "Local Off blocked an independently enabled remote endpoint.");
+            var epoch = DesktopOperationEpoch(remote.Host);
             remote.Session.SetDesktopAccessEnabled(false);
-            Check(previousEpoch.IsCancellationRequested && remote.Consent.IsConnected && !remote.Consent.DesktopAccessEnabled &&
-                !nonUiApproval.Revoked && !delegation.IsCompleted && !remote.Host.GetLocalTask(durable.TaskId).CancellationRequested,
-                "Off failed to cancel the desktop epoch or cancelled independent agent work.");
-            Check(Connected(local.Host) && Connected(remote.Host) && local.Host.Connections.Single().Epoch == binding.Epoch &&
-                remote.Identity.TrustedFingerprints.Contains(local.Identity.Fingerprint), "Off changed TLS or pairing.");
-            foreach (var method in new[] { "get_screen_size", "take_screenshot", "move_mouse", "desktop.acquire" })
+            Check(epoch.IsCancellationRequested && !remote.Consent.HasDesktopLease, "Off retained input state.");
+            foreach (var method in DesktopToolCatalog.All.Concat(AgentToolCatalog.All).Select(tool => tool.Name)
+                         .Concat(["desktop.acquire", "desktop.release"]))
             {
-                await ThrowsCode("desktop_access_disabled", () => LocalInvoke(remote, method, new { }));
-                await ThrowsCode("desktop_access_disabled", () => local.Client.CallAsync("invoke",
-                    new RoutedOperation(binding.ConnectionId, false, new(method, Json.Element(new { }), Guid.NewGuid().ToString("N"))), default));
+                await ThrowsCode("device_access_disabled", () => LocalInvoke(remote, method, new { }));
+                await ThrowsCode("device_access_disabled", () => local.Client.CallAsync("invoke",
+                    new RoutedOperation(binding.ConnectionId, false,
+                        new(method, Json.Element(new { }), Guid.NewGuid().ToString("N"))), default));
             }
-            Check((await remote.Client.CallAsync("describe", new TargetRequest(null, true), default)).Data!.Value.GetArrayLength() > 0,
-                "Off hid the authenticated local metadata catalog.");
-            nonUiApproval.Answer.TrySetResult(false);
-            await ThrowsCode("consent_denied", () => delegation);
+            Check((await local.Client.CallAsync("describe", new TargetRequest(binding.ConnectionId), default))
+                .Data!.Value.GetArrayLength() == DesktopToolCatalog.All.Count + AgentToolCatalog.All.Count,
+                "Off hid or changed the backend catalog.");
+            Check(local.Host.Connections.Single() == binding && Connected(remote.Host) && remote.Consent.IsConnected,
+                "Off disconnected or retargeted the RDP channel.");
+            Check(remote.Host.ListLocalTasks(false).Count == 0 && !remote.Consent.Requests.TryRead(out _),
+                "Off blocked local human metadata or queued approvals.");
             remote.Session.SetDesktopAccessEnabled(true);
-            Check(previousEpoch.IsCancellationRequested && !remote.Consent.HasDesktopLease && !remote.Consent.ObservationAllowed,
-                "On restored a cancelled desktop epoch or prior grant.");
+            Check(epoch.IsCancellationRequested && !remote.Consent.HasDesktopLease, "On replayed input.");
         });
-        await test("desktop off does not close an unpaired pending TLS channel", async () =>
+        await test("device preference survives restarts and new logon directories", async () =>
         {
             await using var fixture = new Fixture();
-            await using var peer = await IncomingPeer.Connect(fixture);
-            await peer.Peer.CallAsync(new("protocol.hello", Json.Element(Hello())), default);
-            await Wait(() => Pending(fixture.Host));
-            var channel = fixture.Host.PeerConnections.Single().Id;
+            Check(fixture.Consent.DeviceAccessEnabled, "Missing preference did not default to Yes.");
             fixture.Session.SetDesktopAccessEnabled(false);
-            var ping = await peer.Peer.CallAsync(new("protocol.ping", Json.Element(new { })), default);
-            Check(ping.Data!.Value.GetProperty("protocolVersion").GetString() == Wire.ProtocolVersion &&
-                fixture.Host.PeerConnections.Single().Id == channel && !fixture.Consent.IsConnected &&
-                !fixture.Consent.DesktopAccessEnabled, "Off changed the pending channel or admitted an unknown peer.");
-        });
-        await test("saved desktop availability survives restart and is scoped to its private session directory", async () =>
-        {
-            await using var fixture = new Fixture();
-            Check(fixture.Consent.DesktopAccessEnabled, "A new broker did not preserve the default On policy.");
-            fixture.Session.SetDesktopAccessEnabled(false);
-            Check(!ReadSavedDesktopAccess(fixture.DataDirectory), "Off was not durably saved.");
+            Check(!ReadSavedDesktopAccess(fixture.IdentityDirectory), "No was not saved in per-user device storage.");
             await fixture.Session.StopAsync();
             var restored = new HumanConsent();
             await using var restarted = CreatePolicyHost(fixture, restored, fixture.DataDirectory);
-            Check(!restored.DesktopAccessEnabled && !restarted.IsRunning && !restored.DesktopAllowed,
-                "A direct/headless host did not load Off before startup.");
-            restarted.Start();
-            Check(!restored.DesktopAccessEnabled, "Starting the broker overwrote the saved choice.");
-            var session = new BrokerSession(fixture.Identity, restored, restarted, fixture.DataDirectory, "both");
-            session.SetDesktopAccessEnabled(true);
-            Check(restored.DesktopAccessEnabled && ReadSavedDesktopAccess(fixture.DataDirectory) &&
-                !restored.HasDesktopLease && !restored.ObservationAllowed, "Persisted On created a grant.");
-            await session.StopAsync();
-            var onAgain = new HumanConsent();
-            await using var next = CreatePolicyHost(fixture, onAgain, fixture.DataDirectory);
-            Check(onAgain.DesktopAccessEnabled && !onAgain.DesktopAllowed, "A saved On choice failed to survive restart.");
-            next.SetDesktopAccessEnabled(false);
-            var other = new HumanConsent();
-            await using var otherLogon = CreatePolicyHost(fixture, other, Path.Combine(fixture.DataDirectory, "other-logon"));
-            Check(other.DesktopAccessEnabled, "One logon's Off choice changed another session directory's default.");
+            Check(!restored.DeviceAccessEnabled, "Restart ignored No.");
+            var another = new HumanConsent();
+            await using var nextLogon = CreatePolicyHost(fixture, another, Path.Combine(fixture.DataDirectory, "other-logon"));
+            Check(!another.DeviceAccessEnabled, "New logon forgot the device preference.");
+            restarted.SetDesktopAccessEnabled(true);
+            Check(restored.DeviceAccessEnabled && !restored.HasDesktopLease &&
+                ReadSavedDesktopAccess(fixture.IdentityDirectory), "Yes failed to persist or restored a lease.");
         });
-        await test("normal Stop disconnect and Quit revoke grants without changing saved desktop availability", async () =>
+        await test("broker switch cancels its accepted unattended coding work without replay", async () =>
         {
-            await using var fixture = new Fixture();
+            var factory = new PolicyRuntimeFactory();
+            await using var fixture = new Fixture(runtimeFactory: factory);
+            fixture.Host.Start();
+            var session = (await LocalInvoke(fixture, "agent_start_session", new { workingDirectory = fixture.Workspace }))
+                .Data!.Value.GetProperty("sessionId").GetString()!;
+            var arguments = new { sessionId = session, prompt = "synthetic test", idempotencyKey = "one",
+                timeoutSeconds = 30, unattended = true, maxAiCredits = 1 };
+            var task = (await LocalInvoke(fixture, "agent_send", arguments)).Data!.Value.GetProperty("taskId").GetString()!;
+            await Wait(() => fixture.Host.GetLocalTask(task).MessageId is not null);
             fixture.Session.SetDesktopAccessEnabled(false);
+            await Wait(() => fixture.Host.GetLocalTask(task).State is "cancelled" or "outcome_unknown" or "failed");
+            var stopped = fixture.Host.GetLocalTask(task);
+            Check(stopped.State == "cancelled" && stopped.ErrorCode == "device_access_disabled" &&
+                stopped.CancellationRequested && factory.Runtime.Aborts == 1 && !fixture.Consent.HasDesktopLease,
+                "Broker No did not request owned coding cancellation.");
             fixture.Session.SetDesktopAccessEnabled(true);
-            fixture.Consent.SetConnected(true);
-            OperationContext.ActorId.Value = "normal-stop";
-            var approval = fixture.Consent.RequestAsync(new("desktop-control", "test"), default);
-            (await fixture.Consent.Requests.ReadAsync()).Answer.TrySetResult(true);
-            Check(await approval && fixture.Consent.DesktopAllowed, "The test grant was not established.");
-            fixture.Host.StopDesktopControl();
-            Check(fixture.Consent.DesktopAccessEnabled && !fixture.Consent.HasDesktopLease && ReadSavedDesktopAccess(fixture.DataDirectory),
-                "Normal Stop silently changed availability.");
-            fixture.Consent.SetConnected(false);
-            Check(fixture.Consent.DesktopAccessEnabled && ReadSavedDesktopAccess(fixture.DataDirectory),
-                "Disconnect changed the saved switch.");
-            await fixture.Session.StopAsync();
-            Check(fixture.Consent.DesktopAccessEnabled && !fixture.Consent.DesktopAllowed && ReadSavedDesktopAccess(fixture.DataDirectory),
-                "Quit changed the saved switch rather than just revoking grants.");
-            await ThrowsCode("broker_stopping", () => { fixture.Session.SetDesktopAccessEnabled(false); return Task.CompletedTask; });
+            await LocalInvoke(fixture, "agent_send", arguments);
+            Check(factory.Runtime.Sends == 1 && !fixture.Consent.Requests.TryRead(out _),
+                "Re-enabling or idempotent retry replayed work or queued approval.");
         });
-        await test("desktop settings reject malformed unsupported duplicate oversized and unreadable data before host startup", async () =>
+        await test("running logons reconcile shared No and cancel owned work without disconnecting", async () =>
+        {
+            await using var fixture = new Fixture();
+            fixture.Host.Start();
+            var consent = new HumanConsent();
+            var factory = new PolicyRuntimeFactory();
+            await using var other = CreatePolicyHost(fixture, consent, Path.Combine(fixture.DataDirectory, "another-logon"), factory);
+            other.Start();
+            Task<OperationResult> Invoke(string method, object arguments) => other.HandleLocalRequestAsync(new("invoke",
+                Json.Element(new RoutedOperation(null, true, new(method, Json.Element(arguments), Guid.NewGuid().ToString("N"))))),
+                "shared-test:1", default);
+            var session = (await Invoke("agent_start_session", new { workingDirectory = fixture.Workspace }))
+                .Data!.Value.GetProperty("sessionId").GetString()!;
+            var task = (await Invoke("agent_send", new { sessionId = session, prompt = "synthetic shared preference",
+                idempotencyKey = "shared", timeoutSeconds = 30, unattended = true, maxAiCredits = 1 }))
+                .Data!.Value.GetProperty("taskId").GetString()!;
+            await Wait(() => other.GetLocalTask(task).MessageId is not null);
+            fixture.Session.SetDesktopAccessEnabled(false);
+            await ThrowsCode("device_access_disabled", () => Invoke("agent_list_sessions", new { }));
+            await Wait(() => other.GetLocalTask(task).State == "cancelled");
+            Check(!consent.DeviceAccessEnabled && other.IsRunning && consent.IsConnected &&
+                factory.Runtime.Aborts == 1, "A running logon ignored shared No or stopped its broker.");
+            fixture.Session.SetDesktopAccessEnabled(true);
+            await Wait(() => consent.DeviceAccessEnabled);
+            Check(factory.Runtime.Sends == 1 && !consent.HasDesktopLease, "Shared Yes replayed work or input ownership.");
+        });
+        await test("first device preference safely migrates prior logons and explicit No wins", async () =>
         {
             await using var fixture = new Fixture();
             await fixture.Session.StopAsync();
-            var path = Path.Combine(fixture.DataDirectory, DesktopAccessSettings.FileName);
+            File.Delete(Path.Combine(fixture.IdentityDirectory, DesktopAccessSettings.FileName));
+            var first = Path.Combine(fixture.IdentityDirectory, "sessions", "old-logon-1");
+            var second = Path.Combine(fixture.IdentityDirectory, "sessions", "old-logon-2");
+            new DesktopAccessSettings(first).Save(true);
+            new DesktopAccessSettings(second).Save(false);
+            var restored = new HumanConsent();
+            await using var host = CreatePolicyHost(fixture, restored, fixture.DataDirectory);
+            Check(!restored.DeviceAccessEnabled && !ReadSavedDesktopAccess(fixture.IdentityDirectory),
+                "Migration discarded an explicit old No.");
+            host.SetDesktopAccessEnabled(true);
+            await host.DisposeAsync();
+            var updated = new HumanConsent();
+            await using var again = CreatePolicyHost(fixture, updated, fixture.DataDirectory);
+            Check(updated.DeviceAccessEnabled && !new DesktopAccessSettings(second).Read(),
+                "Old preferences overrode a later explicit device choice or were destructively rewritten.");
+        });
+        await test("settings fail closed for corrupt unreadable and invalid legacy preferences", async () =>
+        {
+            await using var fixture = new Fixture();
+            await fixture.Session.StopAsync();
+            var path = Path.Combine(fixture.IdentityDirectory, DesktopAccessSettings.FileName);
             foreach (var malformed in new[]
             {
                 "", "null", "{}", "[]", """{"version":1}""", """{"enabled":true}""",
@@ -236,7 +234,7 @@ internal static partial class BackendTests
                 {
                     await using var unexpected = CreatePolicyHost(fixture, consent, fixture.DataDirectory);
                 });
-                Check(!consent.DesktopAccessEnabled && !consent.IsConnected, "Malformed settings left the consent service permissive.");
+                Check(!consent.DeviceAccessEnabled && !consent.IsConnected, "Malformed preferences enabled access.");
             }
             File.WriteAllText(path, """{"version":1,"enabled":false}""");
             using (var locked = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
@@ -246,24 +244,23 @@ internal static partial class BackendTests
                 {
                     await using var unexpected = CreatePolicyHost(fixture, consent, fixture.DataDirectory);
                 });
-                Check(!consent.DesktopAccessEnabled, "Unreadable settings enabled desktop access.");
+                Check(!consent.DeviceAccessEnabled, "Unreadable preference enabled access.");
             }
             File.Delete(path);
-            var missing = new HumanConsent();
-            await using var defaultHost = CreatePolicyHost(fixture, missing, fixture.DataDirectory);
-            Check(missing.DesktopAccessEnabled, "A genuinely missing setting did not preserve the original default.");
+            File.WriteAllText(Path.Combine(fixture.DataDirectory, DesktopAccessSettings.FileName), "malformed legacy");
+            await ThrowsCode("desktop_access_settings_invalid", async () =>
+            {
+                await using var unexpected = CreatePolicyHost(fixture, new(), fixture.DataDirectory);
+            });
         });
-        await test("desktop persistence failure keeps Off fail-closed and cannot enable an unsaved On choice", async () =>
+        await test("failed persistence keeps No effective and cannot enable an unsaved Yes", async () =>
         {
             await using var fixture = new Fixture();
-            fixture.Session.SetDesktopAccessEnabled(false);
+            fixture.Host.Start();
             fixture.Session.SetDesktopAccessEnabled(true);
-            fixture.Consent.SetConnected(true);
             OperationContext.ActorId.Value = "save-failure";
-            var grant = fixture.Consent.RequestAsync(new("desktop-control", "test"), default);
-            (await fixture.Consent.Requests.ReadAsync()).Answer.TrySetResult(true);
-            Check(await grant, "The test grant was not established.");
-            var path = Path.Combine(fixture.DataDirectory, DesktopAccessSettings.FileName);
+            await fixture.Consent.RequestAsync(new("desktop-control", "test"), default);
+            var path = Path.Combine(fixture.IdentityDirectory, DesktopAccessSettings.FileName);
             var epoch = DesktopOperationEpoch(fixture.Host);
             using (var locked = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
             {
@@ -272,12 +269,13 @@ internal static partial class BackendTests
                     fixture.Session.SetDesktopAccessEnabled(false);
                     return Task.CompletedTask;
                 });
-                Check(!fixture.Consent.DesktopAccessEnabled && !fixture.Consent.DesktopAllowed && !fixture.Consent.HasDesktopLease &&
-                    epoch.IsCancellationRequested, "Failed persistence rolled back the human's immediate Off choice.");
+                Check(!fixture.Consent.DeviceAccessEnabled && !fixture.Consent.HasDesktopLease && epoch.IsCancellationRequested,
+                    "Failed save rolled back No.");
             }
-            Check(ReadSavedDesktopAccess(fixture.DataDirectory), "A failed atomic save unexpectedly changed the old durable value.");
+            Check(ReadSavedDesktopAccess(fixture.IdentityDirectory), "Failed save changed the original durable value.");
+            await ThrowsCode("device_access_disabled", () => LocalInvoke(fixture, "agent_list_sessions", new { }));
+            Check(!fixture.Consent.DeviceAccessEnabled, "Refreshing the old saved Yes undid a failed-save No.");
             fixture.Session.SetDesktopAccessEnabled(false);
-            Check(!ReadSavedDesktopAccess(fixture.DataDirectory), "Retrying Off did not persist the failed choice.");
             using (var locked = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
             {
                 await ThrowsCode("desktop_access_persistence_failed", () =>
@@ -285,33 +283,115 @@ internal static partial class BackendTests
                     fixture.Session.SetDesktopAccessEnabled(true);
                     return Task.CompletedTask;
                 });
-                Check(!fixture.Consent.DesktopAccessEnabled && !fixture.Consent.DesktopAllowed, "Failed On persistence enabled desktop access.");
+                Check(!fixture.Consent.DeviceAccessEnabled, "Unsaved Yes enabled access.");
             }
-            Check(!ReadSavedDesktopAccess(fixture.DataDirectory) &&
-                !Directory.EnumerateFiles(fixture.DataDirectory, "*.pending").Any(), "A failed save left a misleading setting or staging file.");
+            Check(!ReadSavedDesktopAccess(fixture.IdentityDirectory) &&
+                !Directory.EnumerateFiles(fixture.IdentityDirectory, "*.pending").Any(), "Failed save left stale staging files.");
         });
-        await test("reentrant availability observers see committed storage and cannot split policy from persistence", async () =>
+        await test("Stop and Quit preserve preference and reentrant observers see committed settings", async () =>
         {
             await using var fixture = new Fixture();
             var reenabled = false;
             fixture.Consent.Changed += () =>
             {
-                if (reenabled || fixture.Consent.DesktopAccessEnabled)
-                    return;
-                Check(!ReadSavedDesktopAccess(fixture.DataDirectory), "Off was announced before its successful save.");
+                if (reenabled || fixture.Consent.DeviceAccessEnabled) return;
+                Check(!ReadSavedDesktopAccess(fixture.IdentityDirectory), "No was announced before its save.");
                 reenabled = true;
                 fixture.Session.SetDesktopAccessEnabled(true);
             };
             fixture.Session.SetDesktopAccessEnabled(false);
-            Check(reenabled && fixture.Consent.DesktopAccessEnabled && ReadSavedDesktopAccess(fixture.DataDirectory) &&
-                !fixture.Consent.HasDesktopLease, "A reentrant change split the saved and effective policies.");
+            Check(reenabled && fixture.Consent.DeviceAccessEnabled && ReadSavedDesktopAccess(fixture.IdentityDirectory),
+                "A reentrant observer split saved and effective preference.");
+            fixture.Host.StopDesktopControl();
+            await fixture.Session.StopAsync();
+            Check(ReadSavedDesktopAccess(fixture.IdentityDirectory), "Stop or Quit changed the preference.");
+            await ThrowsCode("broker_stopping", () => { fixture.Session.SetDesktopAccessEnabled(false); return Task.CompletedTask; });
+        });
+        await test("presence heartbeat TTL and channel disconnect remove only matching agents", () =>
+        {
+            var clock = new PresenceClock();
+            var registry = new AgentPresenceRegistry(clock);
+            registry.Update("local:a", "This computer", null, true);
+            registry.Update("remote:a", "Other computer", "channel-a", true);
+            registry.Update("remote:b", "Other computer", "channel-b", true);
+            clock.Advance(TimeSpan.FromSeconds(44));
+            Check(registry.Snapshot().Count == 3, "A current heartbeat expired early.");
+            registry.Update("local:a", "This computer", null, true);
+            registry.Disconnect("channel-a");
+            Check(registry.Snapshot().Count == 2, "Channel disconnect removed unrelated presence.");
+            clock.Advance(TimeSpan.FromSeconds(1));
+            Check(registry.Snapshot() is [{ Id: "local:a", IsLocal: true }], "Missing heartbeat survived 45 seconds.");
+            registry.Update("local:a", "This computer", null, false);
+            Check(registry.Snapshot().Count == 0, "Clean exit retained local presence.");
+            return Task.CompletedTask;
+        });
+        await test("channel identities are immutable and peer presence cannot impersonate a local agent", async () =>
+        {
+            using var certificate = Certificate();
+            using var other = Certificate();
+            using (var channel = new PeerChannel(PeerDirection.IncomingAgent, default))
+            {
+                channel.Authenticate(certificate, true);
+                await ThrowsCode("identity_changed", () => { channel.Authenticate(other, true); return Task.CompletedTask; });
+                Check(channel.Snapshot.Fingerprint == EndpointIdentity.FingerprintOf(certificate),
+                    "A channel's authenticated endpoint identity was replaced.");
+            }
+            await using var fixture = new Fixture();
+            await using var peer = await IncomingPeer.Connect(fixture, certificate);
+            await peer.Peer.CallAsync(new("protocol.hello", Json.Element(Hello(true))), default);
+            var forged = new McpPresenceRequest("local:123:456:administrator", null, false, true);
+            await ThrowsCode("invalid_actor", () => peer.Peer.CallAsync(new("mcp.presence",
+                Json.Element(forged), "different-actor"), default));
+            await peer.Peer.CallAsync(new("mcp.presence", Json.Element(forged), forged.ActorId), default);
+            Check(fixture.Host.GetAgentConnections() is [{ IsLocal: false, Id: var remoteId }] &&
+                remoteId.StartsWith("remote:", StringComparison.Ordinal) &&
+                remoteId.Contains(EndpointIdentity.FingerprintOf(certificate), StringComparison.Ordinal),
+                "A peer label or forged PID became local authority.");
+            Check(!fixture.Consent.HasDesktopLease && !fixture.Consent.Requests.TryRead(out _), "Presence gained input permission.");
+        });
+        await test("presence uses caller stamping, never executes operations, and forwards only selected channels", async () =>
+        {
+            await using var local = new Fixture();
+            await using var remote = new Fixture();
+            local.Host.Start();
+            remote.Host.Start();
+            await using var pair = await HostPair.Connect(local.Host, remote.Host);
+            await Wait(() => Connected(local.Host) && Connected(remote.Host));
+            local.Session.SetDesktopAccessEnabled(false);
+            remote.Session.SetDesktopAccessEnabled(false);
+            var actor = Guid.NewGuid().ToString("N");
+            Task<OperationResult> Presence(McpPresenceRequest request, string caller = "123:456") =>
+                local.Host.HandleLocalRequestAsync(new("mcp.presence", Json.Element(request)), caller, default);
+            await Presence(new(actor, null, false, true));
+            Check(local.Host.GetAgentConnections() is [{ IsLocal: true }] && remote.Host.GetAgentConnections().Count == 0,
+                "Unbound presence selected an arbitrary computer.");
+            await Presence(new(actor, null, true, true), "999:456");
+            Check(local.Host.GetAgentConnections().Count == 2, "Different authenticated callers collided on the same claimed actor.");
+            await Presence(new(actor, null, false, false), "999:456");
+            Check(local.Host.GetAgentConnections() is [{ Id: var id }] && id.Contains("123:456"),
+                "Another caller deleted presence it did not own.");
+            var connection = local.Host.Connections.Single().ConnectionId;
+            await Presence(new(actor, connection, false, true));
+            var received = remote.Host.GetAgentConnections().Single();
+            Check(!received.IsLocal && received.Id.StartsWith("remote:", StringComparison.Ordinal) &&
+                received.Id.Contains("123:456:" + actor, StringComparison.Ordinal), "Remote presence did not retain authenticated actor scope.");
+            await ThrowsCode("invalid_actor", () => Presence(new("spoof:123", connection, false, true)));
+            await ThrowsCode("invalid_arguments", () => Presence(new(actor, connection, true, true)));
+            await ThrowsCode("disconnected", () => Presence(new(actor, "stale-connection", false, true)));
+            Check(!remote.Consent.HasDesktopLease && remote.Host.ListLocalTasks(false).Count == 0 &&
+                !remote.Consent.Requests.TryRead(out _), "Presence executed actions or requested approval.");
+            await pair.DisposeAsync();
+            await Wait(() => remote.Host.GetAgentConnections().Count == 0);
+            Check(local.Host.GetAgentConnections().Count == 1, "Remote loss erased local registration.");
+            await Presence(new(actor, null, true, false));
+            Check(local.Host.GetAgentConnections().Count == 0, "Clean local exit retained presence.");
         });
     }
 
-    private static BrokerHost CreatePolicyHost(Fixture fixture, HumanConsent consent, string directory) =>
+    private static BrokerHost CreatePolicyHost(Fixture fixture, HumanConsent consent, string directory, ICopilotRuntimeFactory? runtimeFactory = null) =>
         new(fixture.Identity, consent, directory, "both",
             new($"RemoteAgentLink.Test.Control.{Guid.NewGuid():N}", $"RemoteAgentLink.Test.Transport.{Guid.NewGuid():N}",
-                () => throw new IOException("Isolated policy test transport is idle.")));
+                () => throw new IOException("Isolated policy test transport is idle.")), runtimeFactory);
 
     private static bool ReadSavedDesktopAccess(string directory)
     {
@@ -324,5 +404,42 @@ internal static partial class BackendTests
         var desktop = typeof(BrokerHost).GetField("_desktop", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(host)!;
         return ((CancellationTokenSource)desktop.GetType().GetField("authorizationEpoch", BindingFlags.Instance | BindingFlags.NonPublic)!
             .GetValue(desktop)!).Token;
+    }
+
+    private sealed class PresenceClock : TimeProvider
+    {
+        private DateTimeOffset _now = DateTimeOffset.UtcNow;
+        public override DateTimeOffset GetUtcNow() => _now;
+        internal void Advance(TimeSpan value) => _now += value;
+    }
+
+    private sealed class PolicyRuntimeFactory : ICopilotRuntimeFactory
+    {
+        internal PolicyRuntime Runtime { get; } = new();
+        public Task<IAgentRuntimeSession> OpenManagedAsync(AgentSession session, bool resume, RuntimeCallbacks callbacks,
+            CancellationToken cancellationToken) => Task.FromResult<IAgentRuntimeSession>(Runtime);
+        public Task<IAgentRuntimeSession> AttachAsync(LiveRuntimeRegistration registration, RuntimeCallbacks callbacks,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+
+    private sealed class PolicyRuntime : IAgentRuntimeSession
+    {
+        public bool IsExternal => false;
+        internal int Sends;
+        internal int Aborts;
+        public Task<bool> IsIdleAsync(CancellationToken cancellationToken) => Task.FromResult(Sends == Aborts);
+        public Task PrepareAsync(double? maxAiCredits, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<string> SendAsync(string prompt, CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref Sends);
+            return Task.FromResult("owned-message");
+        }
+        public Task<bool> AbortOwnedTurnAsync(string messageId, CancellationToken cancellationToken)
+        {
+            Check(messageId == "owned-message", "Cancellation targeted an unowned turn.");
+            Interlocked.Increment(ref Aborts);
+            return Task.FromResult(true);
+        }
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 }

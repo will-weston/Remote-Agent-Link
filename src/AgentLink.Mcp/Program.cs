@@ -19,12 +19,26 @@ var bridge = new McpBridge(launch.CurrentSession, launch.BrokerPipe, launch.Conn
 var builder = Host.CreateApplicationBuilder();
 builder.Logging.ClearProviders();
 builder.Logging.AddConsole(options => options.LogToStandardErrorThreshold = LogLevel.Trace);
+builder.Services.AddSingleton(bridge);
+builder.Services.AddHostedService<McpPresenceService>();
 builder.Services.AddMcpServer(options =>
 {
-    options.ServerInfo = new Implementation { Name = "remote-agent-link", Version = "0.2.0" };
+    options.ServerInfo = new Implementation { Name = "remote-agent-link", Version = "0.5.0" };
+    options.ServerInstructions = McpGuidance.ServerInstructions(launch);
     options.Capabilities = new ServerCapabilities
     {
-        Tools = new ToolsCapability { ListChanged = true }
+        Tools = new ToolsCapability { ListChanged = false }
+    };
+    options.Handlers = new()
+    {
+        NotificationHandlers =
+        [
+            new(NotificationMethods.InitializedNotification, (_, _) =>
+            {
+                bridge.ClientInitialized();
+                return ValueTask.CompletedTask;
+            })
+        ]
     };
 })
     .WithStdioServerTransport()
@@ -35,11 +49,8 @@ builder.Services.AddMcpServer(options =>
     .WithCallToolHandler(async (context, ct) =>
     {
         var parameters = context.Params ?? throw new ArgumentException("Missing tool parameters.");
-        var result = await bridge.CallAsync(parameters.Name,
+        return await bridge.CallAsync(parameters.Name,
             Json.Element(parameters.Arguments ?? new Dictionary<string, System.Text.Json.JsonElement>()), ct);
-        if (parameters.Name == "rdp_bind_connection" && result.IsError != true)
-            await context.Server.SendNotificationAsync("notifications/tools/list_changed", cancellationToken: ct);
-        return result;
     });
 await builder.Build().RunAsync();
 return 0;

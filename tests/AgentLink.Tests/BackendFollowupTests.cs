@@ -11,7 +11,7 @@ internal static partial class BackendTests
 {
     private static async Task RunFollowupAsync(Func<string, Func<Task>, Task> test)
     {
-        await test("incoming hello cannot use stale trust before revocation notification", async () =>
+        await test("incoming authenticated hello is independent of legacy pin notifications", async () =>
         {
             using var notification = new DelayedTrustNotification();
             await using var fixture = new Fixture(notification.Subscribe);
@@ -31,10 +31,9 @@ internal static partial class BackendTests
             {
                 await notification.WaitUntilSavedAsync();
                 Check(!fixture.Identity.TrustedFingerprints.Contains(fingerprint), "The pin was not removed before notification.");
-                await ThrowsAny(() => peer.Peer.CallAsync(new("protocol.hello", Json.Element(Hello(true))), default));
-                await Wait(() => fixture.Host.PeerConnections.Count == 0);
-                Check(connectedStates == 0 && fixture.Host.Connections.Count == 0 && !fixture.Consent.IsConnected,
-                    "The stale TLS trust snapshot activated an incoming channel.");
+                await peer.Peer.CallAsync(new("protocol.hello", Json.Element(Hello(true))), default);
+                Check(connectedStates > 0 && Connected(fixture.Host) && fixture.Host.Connections.Count == 0,
+                    "Legacy pin notification blocked authenticated admission.");
             }
             finally
             {
@@ -42,7 +41,7 @@ internal static partial class BackendTests
                 await revocation;
             }
         });
-        await test("outgoing hello cannot register stale trust before revocation notification", async () =>
+        await test("outgoing authenticated hello is independent of legacy pin notifications", async () =>
         {
             using var notification = new DelayedTrustNotification();
             await using var fixture = new Fixture(notification.Subscribe);
@@ -67,9 +66,9 @@ internal static partial class BackendTests
                 {
                     await notification.WaitUntilSavedAsync();
                     sendHello.TrySetResult();
-                    await Wait(() => fixture.Host.PeerConnections.Count == 0);
-                    Check(connectedStates == 0 && fixture.Host.Connections.Count == 0 && !fixture.Consent.IsConnected,
-                        "The stale TLS trust snapshot registered an outgoing link.");
+                    await Wait(() => fixture.Host.Connections.Count == 1);
+                    Check(connectedStates > 0 && Connected(fixture.Host),
+                        "Legacy pin notification blocked authenticated link registration.");
                 }
                 finally
                 {
@@ -83,7 +82,7 @@ internal static partial class BackendTests
                 await sendHello.Task.WaitAsync(TimeSpan.FromSeconds(12));
             });
         });
-        await test("current trust loss disables readiness even when a peer was already ready", async () =>
+        await test("channel authentication cannot be replaced after hello", async () =>
         {
             using var certificate = Certificate();
             foreach (var direction in new[] { PeerDirection.RemoteDesktop, PeerDirection.IncomingAgent })
@@ -92,18 +91,15 @@ internal static partial class BackendTests
                 channel.Authenticate(certificate, true);
                 channel.AcceptHello(Hello(true));
                 Check(channel.Ready, "The trusted test channel was not ready.");
-                await ThrowsCode("pairing_required", () =>
+                await ThrowsCode("identity_changed", () =>
                 {
                     channel.ReconcileLocalTrust(false);
                     return Task.CompletedTask;
                 });
-                Check(!channel.Ready && !channel.Snapshot.TrustedLocally, "Current pin removal retained cached readiness.");
-                await ThrowsCode("pairing_required", () =>
-                {
-                    channel.ReconcileLocalTrust(true);
-                    return Task.CompletedTask;
-                });
-                Check(!channel.Ready, "Re-pinning resurrected the old channel without a new handshake.");
+                Check(channel.Ready && channel.Snapshot.TrustedLocally, "A rejected change mutated authenticated channel identity.");
+                channel.Close();
+                await Throws<OperationCanceledException>(() => { channel.ReconcileLocalTrust(true); return Task.CompletedTask; });
+                Check(!channel.Ready, "A closed channel resurrected without a handshake.");
             }
         });
         await test("observer failures are bounded reported and isolated including ui.show delivery", async () =>
@@ -137,9 +133,10 @@ internal static partial class BackendTests
                 await ThrowsCode("ui_unavailable", () => fixture.Client.ShowAsync());
                 fixture.Identity.Trust(new string('A', 64));
                 fixture.Identity.Revoke(new string('A', 64));
+                fixture.Host.OnSessionUnavailable();
                 await Wait(() => laterLog > 0);
                 Check(laterStatus > 0 && laterConsent > 0 && laterTrust == 2 && laterShow == 1 &&
-                    fixture.Identity.TrustedFingerprints.Count == 0 && !fixture.Consent.IsConnected,
+                    fixture.Identity.TrustedFingerprints.Count == 0 && !fixture.Consent.HasDesktopLease,
                     "A failed observer skipped a later observer or interrupted revocation.");
             }
             finally { Console.SetError(originalError); }
@@ -172,21 +169,19 @@ internal static partial class BackendTests
                 diagnostics.Events.Any(item => item.Id == 2 && item.Fields is ["IOException"]),
                 "The independent diagnostic sink did not report the failure or revocation was interrupted.");
         });
-        await test("authenticated current-session metadata stays available offline without desktop permission", async () =>
+        await test("authenticated current-session operations need no incoming RDP channel", async () =>
         {
             await using var fixture = new Fixture();
             fixture.Host.Start();
             await CheckLocalOnlyTargets(fixture);
             var status = await fixture.Client.CallAsync("get", new TargetRequest(null, true), default);
-            Check(!status.Data!.Value.GetProperty("connected").GetBoolean(), "Offline metadata falsely reported a connection.");
-            await Throws<AgentLinkException>(() => LocalInvoke(fixture, "get_screen_size", new { }));
-            await ThrowsCode("disconnected", () => LocalInvoke(fixture, "agent_start_session", new { workingDirectory = fixture.Workspace }));
-            using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(150));
-            await Throws<OperationCanceledException>(() => LocalInvoke(fixture, "desktop.acquire", new { }, cancellation.Token));
-            Check(!fixture.Consent.DesktopAllowed && !fixture.Consent.ObservationAllowed && !fixture.Consent.Requests.TryRead(out _) &&
-                fixture.Host.ListLocalTasks(false).Count == 0, "Local offline access implicitly approved observation, control or agent work.");
+            Check(status.Data!.Value.GetProperty("connected").GetBoolean(), "Authenticated IPC was unavailable without RDP.");
+            await ThrowsCode("runtime_not_configured", () => LocalInvoke(fixture, "agent_start_session", new { workingDirectory = fixture.Workspace }));
+            await LocalInvoke(fixture, "desktop.acquire", new { });
+            Check(fixture.Consent.HasDesktopLease && !fixture.Consent.Requests.TryRead(out _) &&
+                fixture.Host.ListLocalTasks(false).Count == 0, "Local access required approval or launched an unconfigured runtime.");
         });
-        await test("durable local agent queries and cancellation work offline and while remote pairing is pending", async () =>
+        await test("durable local queries remain isolated when an unpaired authenticated peer connects", async () =>
         {
             await using var fixture = new Fixture();
             fixture.Host.Start();
@@ -208,14 +203,14 @@ internal static partial class BackendTests
 
             await using var peer = await IncomingPeer.Connect(fixture);
             await peer.Peer.CallAsync(new("protocol.hello", Json.Element(Hello(true))), default);
-            await Wait(() => Pending(fixture.Host));
+            await Wait(() => Connected(fixture.Host));
             var pendingTask = SeedTask(fixture, owner, "waiting_for_connection");
             Check((await LocalInvoke(fixture, "agent_get_task", new { taskId = completed.TaskId })).Data!.Value
                 .GetProperty("result").GetString() == "durable result", "Pending pairing blocked local durable reads.");
             await LocalInvoke(fixture, "agent_cancel_task", new { taskId = pendingTask.TaskId });
             Check(fixture.Host.GetLocalTask(pendingTask.TaskId).CancellationRequested &&
-                !fixture.Consent.IsConnected && !fixture.Consent.DesktopAllowed && !fixture.Consent.ObservationAllowed,
-                "Local cancellation was blocked or pending pairing enabled consent.");
+                fixture.Consent.IsConnected && !fixture.Consent.HasDesktopLease,
+                "Local cancellation was blocked or acquired input.");
             await ThrowsAny(() => peer.Peer.CallAsync(new("agent_get_task", Json.Element(new { taskId = completed.TaskId }), "claimed-agent"), default));
         });
     }

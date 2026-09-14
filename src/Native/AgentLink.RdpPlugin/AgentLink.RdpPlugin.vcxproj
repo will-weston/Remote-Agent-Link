@@ -21,7 +21,7 @@
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile><AdditionalIncludeDirectories>$(ProxyGenerated);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile>
-    <Link><SubSystem>Windows</SubSystem><AdditionalDependencies>uuid.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
+    <Link><SubSystem>Windows</SubSystem><AdditionalDependencies>uuid.lib;user32.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ProjectReference Include="..\AgentLink.ProxyStub\AgentLink.ProxyStub.vcxproj">
@@ -30,6 +30,6 @@
     </ProjectReference>
   </ItemGroup>
   <ItemGroup><ClCompile Include="main.cpp" /><ClCompile Include="RdpPlugin.cpp" /><ClCompile Include="ActivationFactory.cpp" /><ClCompile Include="PluginLoadingMode.cpp" /></ItemGroup>
-  <ItemGroup><ClInclude Include="RdpPlugin.h" /><ClInclude Include="ServerLifetime.h" /></ItemGroup>
+  <ItemGroup><ClInclude Include="RdpPlugin.h" /><ClInclude Include="ServerLifetime.h" /><ClInclude Include="SurfaceMetadata.h" /></ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

@@ -1,4 +1,3 @@
-using System.Collections.ObjectModel;
 using AgentLink.Broker.Shell;
 using AgentLink.Copilot;
 
@@ -9,7 +8,6 @@ public sealed class SettingsViewModel : ObservableModel
     private string _startupStatus = "Checking Windows startup registration…";
     private string _runtimeStatus = "Choose an installed executable. No runtime is downloaded, started or authenticated by setup.";
     private string _pluginLoadingStatus = "Checking RDP loading settings...";
-    public string Fingerprint { get; internal set; } = "";
     public string DataDirectory { get; internal set; } = "";
     public string Role { get; internal set; } = "";
     public string RuntimeRequirement => $"Copilot {OfficialSdkRuntimeFactory.RequiredRuntimeVersion} · SDK {OfficialSdkRuntimeFactory.SdkVersion}";
@@ -21,7 +19,6 @@ public sealed class SettingsViewModel : ObservableModel
     public bool CanChangePluginLoading { get; private set; }
     public bool NeedsPluginLoadingRepair { get; private set; }
     public string PluginLoadingRepairText { get; private set; } = "Restore Modern";
-    public ObservableCollection<string> TrustedFingerprints { get; } = [];
 
     internal void BeginPluginLoadingChange()
     {

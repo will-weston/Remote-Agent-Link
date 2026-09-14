@@ -10,7 +10,7 @@
          xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
          IgnorableNamespaces="uap uap3 uap5 desktop desktop4 com virtualization rescap">
   <Identity Name="RemoteAgentLink" Publisher="CN=Remote Agent Link Development"
-            Version="0.4.0.1" ProcessorArchitecture="x64" />
+            Version="0.5.0.0" ProcessorArchitecture="x64" />
   <Properties>
     <DisplayName>Remote Agent Link</DisplayName>
     <PublisherDisplayName>Remote Agent Link contributors</PublisherDisplayName>
@@ -27,7 +27,7 @@
   <Resources><Resource Language="en-us" /></Resources>
   <Applications>
     <Application Id="Broker" Executable="Broker\AgentLink.Broker.exe" EntryPoint="Windows.FullTrustApplication" desktop4:SupportsMultipleInstances="true">
-      <uap:VisualElements DisplayName="Remote Agent Link" Description="Pairing, human control, and remote agent broker"
+      <uap:VisualElements DisplayName="Remote Agent Link" Description="Connected computers, device access, and remote agents"
                           BackgroundColor="transparent" Square150x150Logo="Assets\Logo150.png" Square44x44Logo="Assets\Logo44.png" />
       <Extensions>
         <uap5:Extension Category="windows.appExecutionAlias">
@@ -87,6 +87,9 @@
         <com:Interface Id="A1230204-D6A7-11D8-B9FD-000BDBD1F198" ProxyStubClsid="586B220F-6970-4E64-B5DD-438A298A876A" />
         <com:Interface Id="A1230205-D6A7-11D8-B9FD-000BDBD1F198" ProxyStubClsid="586B220F-6970-4E64-B5DD-438A298A876A" />
         <com:Interface Id="A1230207-D6A7-11D8-B9FD-000BDBD1F198" ProxyStubClsid="586B220F-6970-4E64-B5DD-438A298A876A" />
+        <com:Interface Id="D3E07363-087C-476C-86A7-DBB15F46DDB4" ProxyStubClsid="586B220F-6970-4E64-B5DD-438A298A876A" />
+        <com:Interface Id="E8A47FD3-1AF6-4D7F-8E15-515CCAE1C00C" ProxyStubClsid="586B220F-6970-4E64-B5DD-438A298A876A" />
+        <com:Interface Id="2A002C7B-0120-4D04-BFB1-3C73110C8581" ProxyStubClsid="586B220F-6970-4E64-B5DD-438A298A876A" />
       </com:ComInterface>
     </com:Extension>
   </Extensions>

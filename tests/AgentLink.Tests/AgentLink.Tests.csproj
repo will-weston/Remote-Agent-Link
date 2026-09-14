@@ -9,6 +9,8 @@
     <Compile Include="..\..\src\AgentLink.Broker\PipeSecurity.cs" Link="Security\PipeSecurity.cs" />
     <Compile Include="..\..\src\AgentLink.Broker\PeerAdmission.cs" Link="Security\PeerAdmission.cs" />
     <Compile Include="..\..\src\AgentLink.Broker\BrokerHost.cs" Link="Backend\BrokerHost.cs" />
+    <Compile Include="..\..\src\AgentLink.Broker\ClientConnectionReport.cs" Link="Backend\ClientConnectionReport.cs" />
+    <Compile Include="..\..\src\AgentLink.Broker\ClientSurfaceReport.cs" Link="Backend\ClientSurfaceReport.cs" />
     <Compile Include="..\..\src\AgentLink.Broker\Shell\BrokerSession.cs" Link="Backend\BrokerSession.cs" />
     <Compile Include="..\..\src\AgentLink.Broker\BrokerDiagnostics.cs" Link="Backend\BrokerDiagnostics.cs" />
     <Compile Include="..\..\src\AgentLink.Broker\WtsStream.cs" Link="Backend\WtsStream.cs" />

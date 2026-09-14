@@ -14,6 +14,7 @@ using Mode = ral::PluginLoadingMode;
 
 namespace {
 unsigned checks{};
+HRESULT NoClientReporter(std::wstring&) noexcept { return S_FALSE; }
 void Check(bool value, const char* message) {
     ++checks;
     if (!value) throw std::runtime_error(message);
@@ -201,7 +202,7 @@ void ClassFactoryTests() {
         for (const auto selected : {Mode::Modern, Mode::Legacy}) {
             state.selected = selected;
             ComPtr<IClassFactory> activation;
-            Check(ral::CreatePluginClassFactory(clsid, &activation, ReadMode, &state) == S_OK && activation,
+            Check(ral::CreatePluginClassFactory(clsid, &activation, ReadMode, &state, NoClientReporter) == S_OK && activation,
                 "construct actual CLSID activation path with injected selection");
             const auto reads = state.reads;
             ComPtr<IUnknown> unknown;
@@ -226,6 +227,28 @@ void ClassFactoryTests() {
                 Check(created == HRESULT_FROM_WIN32(ERROR_ACCESS_DISABLED_BY_POLICY) && !plugin,
                     "disabled CLSID factory creation explicitly fails");
             }
+            ComPtr<IWTSPlugin> fromUnknown;
+            const auto queried = unknown.As(&fromUnknown);
+            if (clsid == ral::LegacyPluginClsid && selected == Mode::Legacy) {
+                Check(queried == S_OK && fromUnknown,
+                    "legacy IUnknown activation supports subsequent IWTSPlugin query");
+                ComPtr<IWTSPluginFactory> fromPlugin;
+                Check(fromUnknown.As(&fromPlugin) == S_OK,
+                    "legacy plugin can query back to its activation factory");
+                ComPtr<IUnknown> factoryIdentity, pluginIdentity;
+                Check(fromPlugin.As(&factoryIdentity) == S_OK && fromUnknown.As(&pluginIdentity) == S_OK &&
+                    factoryIdentity.Get() == unknown.Get() && pluginIdentity.Get() == unknown.Get(),
+                    "both legacy interfaces share one controlling IUnknown");
+                ComPtr<ProbeManager> manager;
+                manager.Attach(new ProbeManager);
+                Check(fromUnknown->Initialize(manager.Get()) == S_OK && manager->listeners == 1,
+                    "IUnknown-first legacy activation initializes the actual listener");
+                Check(fromUnknown->Terminated() == S_OK && plugin->Connected() == S_OK,
+                    "direct legacy object state is independent of factory-created plugins");
+            } else {
+                Check(FAILED(queried) && !fromUnknown,
+                    "unselected legacy and modern activation never expose a direct plugin");
+            }
             ComPtr<IWTSPlugin> direct;
             const auto result = activation->CreateInstance(nullptr, IID_PPV_ARGS(&direct));
             if (clsid == ral::PluginFactoryClsid) {
@@ -240,6 +263,9 @@ void ClassFactoryTests() {
                 manager.Attach(new ProbeManager);
                 Check(direct->Initialize(manager.Get()) == S_OK && manager->listeners == 1,
                     "direct legacy activation reuses the same actual RALink.v1 listener");
+                ComPtr<IWTSPluginFactory> directFactory;
+                Check(direct.As(&directFactory) == S_OK && directFactory->GetPluginCount(&count) == S_OK && count == 1,
+                    "legacy activation exposes the same interfaces regardless of initial IID");
             }
         }
     }
@@ -252,7 +278,7 @@ void FactoryGateTests() {
     for (const auto path : {Mode::Modern, Mode::Legacy}) {
         for (const auto selected : {Mode::Modern, Mode::Legacy}) {
             ComPtr<IWTSPluginFactory> factory;
-            Check(ral::CreatePluginFactory(path, selected, &factory) == S_OK && factory, "construct explicit gate");
+            Check(ral::CreatePluginFactory(path, selected, &factory, NoClientReporter) == S_OK && factory, "construct explicit gate");
             long count = -1;
             Check(factory->GetPluginCount(nullptr) == E_POINTER, "gated factory count requires output");
             Check(factory->GetPluginCount(&count) == S_OK && count == (path == selected ? 1 : 0),
@@ -290,8 +316,8 @@ void FactoryGateTests() {
 void SnapshotTests() {
     ModeState state;
     ComPtr<IClassFactory> modern, legacy;
-    Check(ral::CreatePluginClassFactory(ral::PluginFactoryClsid, &modern, ReadMode, &state) == S_OK &&
-        ral::CreatePluginClassFactory(ral::LegacyPluginClsid, &legacy, ReadMode, &state) == S_OK,
+    Check(ral::CreatePluginClassFactory(ral::PluginFactoryClsid, &modern, ReadMode, &state, NoClientReporter) == S_OK &&
+        ral::CreatePluginClassFactory(ral::LegacyPluginClsid, &legacy, ReadMode, &state, NoClientReporter) == S_OK,
         "construct both unregistered COM activation classes");
     Check(state.reads == 0, "server registration does not capture a process-wide mode");
     Check(modern->CreateInstance(nullptr, __uuidof(IWTSPluginFactory), nullptr) == E_POINTER,
@@ -318,6 +344,10 @@ void SnapshotTests() {
         legacyBefore->GetPluginCount(&count) == S_OK && count == 0, "old snapshots retain Modern gate");
     Check(modernAfter->GetPluginCount(&count) == S_OK && count == 0 &&
         legacyAfter->GetPluginCount(&count) == S_OK && count == 1, "new snapshots use Legacy gate");
+    ComPtr<IWTSPlugin> oldDisabledDirect, enabledDirect;
+    Check(FAILED(legacyBefore.As(&oldDisabledDirect)) && !oldDisabledDirect &&
+        legacyAfter.As(&enabledDirect) == S_OK && enabledDirect,
+        "legacy queried interface set follows the activation snapshot, not the current setting");
     Check(modernPlugin->Connected() == S_OK, "existing plugin unaffected by switch");
     ComPtr<IWTSPlugin> anotherModern;
     Check(modernBefore->CreatePlugin(0, &anotherModern) == S_OK, "old enabled snapshot can still create");
@@ -330,6 +360,10 @@ void SnapshotTests() {
     state.selected = Mode::Modern;
     Check(second->Connected() == S_OK && legacyAfter->GetPluginCount(&count) == S_OK && count == 1,
         "switching back does not mutate old Legacy objects");
+    ComPtr<IWTSPlugin> stillEnabled;
+    Check(legacyAfter.As(&stillEnabled) == S_OK && stillEnabled.Get() == enabledDirect.Get() &&
+        FAILED(legacyBefore.As(&oldDisabledDirect)) && !oldDisabledDirect,
+        "legacy QueryInterface results stay static after switching back to Modern");
     for (const auto failure : {E_ACCESSDENIED, HRESULT_FROM_WIN32(ERROR_READ_FAULT), S_FALSE}) {
         state.result = failure;
         raw = reinterpret_cast<void*>(static_cast<ULONG_PTR>(1));
@@ -364,7 +398,7 @@ void SnapshotTests() {
     TestSettings settings;
     settings.Create();
     ComPtr<IClassFactory> fromRegistry;
-    Check(ral::CreatePluginClassFactory(ral::LegacyPluginClsid, &fromRegistry, ReadRegistryMode, &settings) == S_OK,
+    Check(ral::CreatePluginClassFactory(ral::LegacyPluginClsid, &fromRegistry, ReadRegistryMode, &settings, NoClientReporter) == S_OK,
         "registry reader is injectable without production class registration");
     const DWORD malformed = 2;
     settings.Write(REG_DWORD, &malformed, sizeof(malformed));

@@ -16,7 +16,7 @@ public sealed class ActivityViewModel : ObservableModel
     private bool _hasOlder;
     private bool _isEmpty = true;
     private string _status = "Task history is stored on this device.";
-    private string _details = "Select a task to see its prompt, permission grant and result.";
+    private string _details = "Select a task to see its prompt, scope and result.";
     private TaskItem? _selected;
     internal string? BeforeTaskId { get; private set; }
     private string? _lastTaskId;
@@ -58,6 +58,6 @@ public sealed class ActivityViewModel : ObservableModel
         $"Task: {task.TaskId}\nSession: {task.SessionId}\nState: {task.State}\n" +
         $"Cancellation requested: {task.CancellationRequested}\nDeadline: {task.Deadline:u}\n" +
         $"Result retention expired: {task.ResultsExpired}\nReconciliation acknowledged: {task.ReconciliationAcknowledged}\n" +
-        $"Permission grant:\n{JsonSerializer.Serialize(task.Grant, new JsonSerializerOptions(Json.Options) { WriteIndented = true })}\n" +
+        $"Task scope:\n{JsonSerializer.Serialize(task.Grant, new JsonSerializerOptions(Json.Options) { WriteIndented = true })}\n" +
         $"Error: {task.ErrorCode ?? "(none)"}\n\nPrompt:\n{task.Prompt}\n\nResult:\n{task.Result ?? "(not available)"}";
 }

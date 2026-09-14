@@ -14,21 +14,22 @@ agents.OnConnectionChanged(connected);
 Keep this object in the **remote per-user/logon broker**, not the local MCP
 process or an RDP-channel object. Do not dispose it on disconnect. Dispose it at
 broker shutdown. A stable authenticated `ActorId` isolates sessions/tasks between
-paired peers; if omitted, `OperationContext.ActorId` is used, then `"local"`.
+authenticated endpoints; if omitted, `OperationContext.ActorId` is used, then `"local"`.
 
 The broker must survive transport-client exit. This library does not install a
 service, alter disconnected-session timeout policies, survive logoff/reboot, or
 keep a disconnected desktop usable. Unattended workers use broker/task/deadline
 cancellation, never the per-request transport token.
 
-`IConsentService.RequestAsync` must display and authorize **each actual task
-grant**, not silently reuse a broad capability decision. The summary includes
-the task prompt, exact workspace, read/write permissions, exact commands, timeout,
-and requested credit limit. An unattended task requires separate
-`unattended-execution` approval as well as `agent-delegation`. Authorization comes
-from the remote local-human control UI, not model text. Consent callbacks must be
-usable without holding a transport lock. Connection-loss notification invalidates
-outstanding approval epochs.
+The broker's device-access policy implements `IConsentService`: Yes permits
+supported scoped work without per-task approval dialogs; No rejects new
+operations and requests cancellation of owned work, including unattended tasks.
+Each task still records its exact workspace, read/write scope, commands, timeout
+and optional credit limit. These limits are not replaced with unrestricted
+runtime approval. Enterprise-managed requirements and requests outside the
+supported scope must fail explicitly, never wait for a removed approval UI.
+The policy runs without holding transport locks; disconnect and device blocking
+invalidate the relevant operation lifetimes.
 
 An overload `(consent, dataDirectory, ICopilotRuntimeFactory)` supports offline
 tests and future compatible runtime adapters. The production default always uses
@@ -47,8 +48,8 @@ AgentTask selected = agents.GetLocalTask(selectedTaskId);
 AgentTask cancellation = agents.CancelLocalTask(selectedTaskId);
 ```
 
-These methods deliberately show/control tasks across this Windows user's paired
-peers. **Do not expose or proxy them as MCP/RDP methods.** Remote operations keep
+These methods deliberately show/control tasks across this Windows user's
+endpoints. **Do not expose or proxy them as MCP/RDP methods.** Remote operations keep
 their actor ownership checks; there are no local-control or registration RPC
 tools. The local API grants no new permissions and cannot answer approval
 questions.
@@ -118,7 +119,7 @@ changes.
 3. The local Control UI selects the installed `.exe` with a file picker and
    calls `LocalSetup.ConfigureManagedRuntime(dataDirectory, selectedExe)`.
    This records a path only; it neither launches a process nor downloads a CLI.
-4. After local authorization of `agent_start_session`, the broker uses the
+4. While device access is enabled, `agent_start_session` uses the
    official SDK's `RuntimeConnection.ForStdio(path: selectedExe)` to launch its
    own runtime. **No separate headless launch command is required.** The SDK owns
    that process and the broker checks its reported version before proceeding.
@@ -247,20 +248,22 @@ exposes the requirements for the control UI.
 `timeoutSeconds` (1–86400). `workingDirectory` defaults to the session directory
 and cannot switch it. `unattended` defaults to false; true requires an explicit
 positive finite `maxAiCredits`. `allowWorkspaceRead`, `allowWorkspaceWrite`,
-and `approvedCommands` are proposed task grants, defaulting to no preapproval.
+and `approvedCommands` describe the task's explicit scope, defaulting to no
+workspace/command preauthorization. Device access does not widen these fields.
 
 Only canonical absolute local Windows paths without reparse points or alternate
 streams qualify. The workspace cannot overlap broker-private data. Trusted
-workspace read/write requests can be preauthorized. Exact, locally approved
+workspace read/write requests can be scoped explicitly. Exact, task-scoped
 non-UI `dotnet build/test/--info` and `git status/diff/log/show` commands without
 shell expression syntax qualify; extra paths, URLs, redirection, sandbox-bypass
 requests, and managed-approval requirements prevent preapproval.
 
 **This is not an OS sandbox.** Trusted build scripts can execute arbitrary code,
 and path checks cannot provide kernel-level protection against filesystem races.
-Only trusted workspaces should receive unattended build grants. Unrecognized
-permissions go to new local-human consent, and remain pending while disconnected.
-Desktop requests are not preauthorized and additionally require `DesktopAllowed`.
+Only trusted workspaces should receive unattended build grants. Unrecognized or
+out-of-scope permissions are not automatically approved. Desktop requests
+additionally require `DesktopAllowed`; a coding session is never a workaround
+for failed remote computer-use tools.
 
 The required credit ceiling is passed through the pinned SDK's typed
 `session.Rpc.Options.UpdateAsync(sessionLimits: ...)` API before message dispatch.
@@ -294,7 +297,10 @@ simultaneous turns return `session_busy`, never surprise-inject or silently queu
 States: `accepted`, `running`, `waiting_for_input`, `waiting_for_approval`,
 `waiting_for_desktop`, `completed`, `failed`, `cancelled`, `interrupted`, and
 `outcome_unknown`. Disconnect interrupts attended work and attempts an owned-turn
-abort. Authorized unattended work continues; new permissions/input wait.
+abort. Scoped unattended work can continue while device access stays enabled;
+normal questions can wait, but removed broker approval dialogs are not a recovery
+path for unsupported permissions. Device blocking requests cancellation of owned
+work without rolling back prior effects.
 Cancellation responses acknowledge **broker receipt**, not guaranteed completed
 cancellation; poll `agent_get_task` for the outcome. Busy detach is rejected.
 

@@ -39,7 +39,7 @@ internal sealed class TrayIcon : IDisposable
         _hotkeyRegistered = RegisterHotKey(window, 1, 0x0001 | 0x0002 | 0x4000, 0x13);
         _sessionRegistered = WTSRegisterSessionNotification(window, 0);
         var warnings = new List<string>();
-        if (!_hotkeyRegistered) warnings.Add("Ctrl+Alt+Pause is unavailable. Turn off desktop access on Home or use the tray menu.");
+        if (!_hotkeyRegistered) warnings.Add("Ctrl+Alt+Pause is unavailable. Turn off agent access on Home or use the tray menu.");
         if (!_sessionRegistered) warnings.Add("Windows session notifications are unavailable. Desktop and heartbeat safety checks remain active.");
         RegistrationWarning = warnings.Count == 0 ? null : string.Join(" ", warnings);
         EnsurePresent();
@@ -142,7 +142,7 @@ internal sealed class TrayIcon : IDisposable
             AppendMenu(menu, 0x0800, 0, "");
             AppendMenu(menu, 0, (nuint)TrayAction.Open, "&Open Remote Agent Link");
             AppendMenu(menu, 0, (nuint)TrayAction.Activity, "&Activity and tasks");
-            AppendMenu(menu, 0, (nuint)TrayAction.Stop, "&Block agent desktop access on this PC\tCtrl+Alt+Pause");
+            AppendMenu(menu, 0, (nuint)TrayAction.Stop, "&Block agent access on this device\tCtrl+Alt+Pause");
             AppendMenu(menu, 0x0800, 0, "");
             AppendMenu(menu, 0, (nuint)TrayAction.Quit, "&Quit Remote Agent Link");
             SetMenuDefaultItem(menu, (uint)TrayAction.Open, false);

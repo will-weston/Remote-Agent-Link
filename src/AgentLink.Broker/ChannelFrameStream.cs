@@ -5,7 +5,7 @@ using AgentLink.Core;
 namespace AgentLink.Broker;
 
 // Enforces a small pre-admission allocation bound before Wire.ReadAsync sees a
-// header. The normal wire limits are used only after local trust AND readiness.
+// header. Normal wire limits apply only after TLS and immutable endpoint hello.
 internal sealed class ChannelFrameStream(Stream inner, Func<bool> ready) : Stream
 {
     internal const int MaximumPendingFrameBytes = 4096;

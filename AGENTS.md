@@ -21,17 +21,21 @@ checked-in scripts, not Unix-only build assumptions or private sibling repos.
 ## Architecture and invariants
 
 - `src\Native` owns packaged COM/DVC/WTS transport. Keep callbacks small.
-- `AgentLink.Broker` owns per-logon state, pairing, consent and the WinUI shell.
+- `AgentLink.Broker` owns per-logon state, device access and the WinUI shell.
 - `AgentLink.Core` owns shared contracts/IPC; `AgentLink.Desktop` owns desktop
   operations and the isolated UIA worker.
 - `AgentLink.Mcp` is per-client stdio, not a network listener. Never silently
   retarget a process binding.
-- `AgentLink.Copilot` owns approved managed sessions and durable tasks.
+- `AgentLink.Copilot` owns scoped managed sessions and durable tasks.
   Interactive CLI attachment remains production-disabled pending its contract.
-- Preserve message limits, current-pin admission, actor/logon checks, human-only
-  approval, desktop epochs, cancellation and no replay of uncertain mutations.
-- The desktop switch affects this desktop only. On allows approval requests;
-  Off revokes observation/input, not RDP or separately approved non-UI work.
+- Authenticated RDP/session IPC is the access boundary. The device switch
+  defaults to Yes; there is no fingerprint pairing or per-action broker approval.
+  Preserve actor/logon checks, message limits, exclusive input ownership,
+  protected UI, desktop epochs, cancellation and no replay of uncertain mutations.
+- No blocks new desktop and coding operations and cancels broker-owned work,
+  without disconnecting RDP. Only local user controls can change this setting.
+- MCP declares all 32 tools at startup; never change declarations on binding,
+  readiness, access or disconnect. Enforce target/support/access at invocation.
 - RDP loading defaults to Modern. Legacy uses a separate packaged COM class;
   never zero the modern factory unconditionally. Only its owned AddIns leaf is
   unvirtualized; keep preference/state and other registry/file virtualization.

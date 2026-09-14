@@ -51,7 +51,7 @@ internal static partial class BackendTests
             fixture.Identity.RefreshTrust();
             Check(fixture.Identity.TrustedFingerprints.Count == 0 && events == 2, "External revocation was not reconciled.");
         });
-        await test("pending admission is atomic and never converts an absent pin into trust", async () =>
+        await test("authenticated channel admission is atomic and needs no saved pin", async () =>
         {
             using var certificate = Certificate();
             var gate = new object();
@@ -72,14 +72,14 @@ internal static partial class BackendTests
                 mutationStarted.Set();
                 lock (gate)
                 {
-                    Check(registeredTrust == false, "Trust mutation overtook pending registration.");
+                    Check(registeredTrust == true, "Trust mutation overtook channel registration.");
                     pins = [EndpointIdentity.FingerprintOf(certificate)];
                 }
             });
             Check(await Task.Run(() => mutationStarted.Wait(TimeSpan.FromSeconds(5))), "Mutation did not start.");
             release.Set();
             await Task.WhenAll(admission, mutation);
-            Check(registeredTrust == false, "An unpinned certificate was authorized.");
+            Check(registeredTrust == true, "An authenticated channel required a saved pin.");
         });
         await test("malformed and impersonating channel metadata is rejected", async () =>
         {
@@ -175,7 +175,7 @@ internal static partial class BackendTests
             channel.Authenticate(certificate, false);
             channel.AcceptHello(Hello(true) with { DisplayName = "Approved administrator" });
             Check(!channel.Ready && !channel.Snapshot.TrustedLocally && channel.Snapshot.TrustedRemotely &&
-                channel.Snapshot.Status == PeerConnectionStatus.AwaitingApproval, "A peer authorized itself.");
+                channel.Snapshot.Status == PeerConnectionStatus.Connecting, "A peer authorized itself.");
             await Throws<AgentLinkException>(() => { channel.RequireReady(); return Task.CompletedTask; });
             channel.Close();
             await Throws<OperationCanceledException>(() => { channel.AcceptHello(Hello(true)); return Task.CompletedTask; });
@@ -203,39 +203,38 @@ internal static partial class BackendTests
                 channel.Dispose();
             }
         });
-        await test("automatic mutual TLS shows both pending directions without exposing tools", async () =>
+        await test("automatic mutual TLS admits both directions without saved pairing", async () =>
         {
             await using var local = new Fixture();
             await using var remote = new Fixture();
             local.Host.Start();
             remote.Host.Start();
             await using var pair = await HostPair.Connect(local.Host, remote.Host);
-            await Wait(() => Pending(local.Host) && Pending(remote.Host));
+            await Wait(() => Connected(local.Host) && Connected(remote.Host));
             var outgoing = local.Host.PeerConnections.Single();
             var incoming = remote.Host.PeerConnections.Single();
             Check(outgoing.Direction == PeerDirection.RemoteDesktop && incoming.Direction == PeerDirection.IncomingAgent,
                 "Channel directions were reversed.");
             Check(outgoing.Fingerprint == remote.Identity.Fingerprint && incoming.Fingerprint == local.Identity.Fingerprint,
                 "Displayed fingerprints were not TLS identities.");
-            Check(!outgoing.TrustedLocally && !outgoing.TrustedRemotely && local.Host.Connections.Count == 0 &&
-                remote.Host.Connections.Count == 0 && !local.Consent.IsConnected && !remote.Consent.IsConnected,
-                "A pending channel became an operation link.");
+            Check(outgoing.TrustedLocally && outgoing.TrustedRemotely && local.Host.Connections.Count == 1 &&
+                remote.Host.Connections.Count == 0 && local.Identity.TrustedFingerprints.Count == 0 &&
+                remote.Identity.TrustedFingerprints.Count == 0, "Channel admission required or persisted pairing.");
             await CheckLocalOnlyTargets(local);
             await CheckLocalOnlyTargets(remote);
         });
-        await test("one-sided pairing stays pending and mutation cancels both channel lifetimes", async () =>
+        await test("obsolete pin changes do not disconnect authenticated channels", async () =>
         {
             await using var local = new Fixture();
             await using var remote = new Fixture();
             local.Identity.Trust(remote.Identity.Fingerprint);
             await using var pair = await HostPair.Connect(local.Host, remote.Host);
-            await Wait(() => Pending(local.Host) && Pending(remote.Host));
-            Check(local.Host.PeerConnections.Single() is { TrustedLocally: true, TrustedRemotely: false } &&
-                remote.Host.PeerConnections.Single() is { TrustedLocally: false, TrustedRemotely: true },
-                "One-sided pairing was not represented truthfully.");
+            await Wait(() => Connected(local.Host) && Connected(remote.Host));
+            var id = local.Host.Connections.Single().ConnectionId;
             remote.Identity.Trust(local.Identity.Fingerprint);
-            Check(remote.Host.PeerConnections.Count == 0 && !remote.Consent.IsConnected, "Trust mutation retained the pending channel.");
-            await Wait(() => local.Host.PeerConnections.Count == 0);
+            remote.Identity.RevokeAll();
+            Check(Connected(remote.Host) && local.Host.Connections.Single().ConnectionId == id,
+                "Obsolete pairing state changed channel authorization.");
         });
         await test("an idle incoming retry does not misreport a healthy outgoing channel", async () =>
         {
@@ -250,7 +249,7 @@ internal static partial class BackendTests
             Check(local.Host.IsRunning && local.Host.LastTransportError is null && local.Host.Connections.Count == 1,
                 "An expected incoming retry reported failure for a healthy outgoing channel.");
         });
-        await test("paired channels expose only outgoing MCP links and no implicit permissions", async () =>
+        await test("channels expose outgoing MCP links and automatic exclusive control", async () =>
         {
             await using var local = new Fixture();
             await using var remote = new Fixture();
@@ -260,9 +259,9 @@ internal static partial class BackendTests
             await using var pair = await HostPair.Connect(local.Host, remote.Host);
             await Wait(() => Connected(local.Host) && Connected(remote.Host));
             Check(local.Host.Connections.Count == 1 && remote.Host.Connections.Count == 0, "Incoming channel leaked into the MCP target list.");
-            Check(!local.Consent.IsConnected && remote.Consent.IsConnected, "Outgoing channel made the own-session desktop available.");
+            Check(local.Consent.IsConnected && remote.Consent.IsConnected, "Authenticated local IPC was unavailable.");
             Check(!local.Consent.DesktopAllowed && !remote.Consent.DesktopAllowed && !remote.Consent.ObservationAllowed,
-                "Pairing silently granted a desktop permission.");
+                "An anonymous context inherited desktop permission.");
             var id = local.Host.Connections.Single().ConnectionId;
             var catalog = await local.Client.CallAsync("describe", new TargetRequest(id), default);
             Check(catalog.Data!.Value.GetArrayLength() > 0, "Ready catalog forwarding failed.");
@@ -270,17 +269,13 @@ internal static partial class BackendTests
                 "The authenticated local catalog became unavailable without an incoming channel.");
             var acquire = local.Client.CallAsync("invoke", new RoutedOperation(id, false,
                 new("desktop.acquire", Json.Element(new { }), Guid.NewGuid().ToString("N"))), default);
-            var approval = await remote.Consent.Requests.ReadAsync();
-            Check(approval.Request.Capability == "desktop-control" && !acquire.IsCompleted, "Desktop control did not await a human.");
-            remote.Identity.Revoke(local.Identity.Fingerprint);
-            Check(!remote.Consent.IsConnected && !remote.Consent.DesktopAllowed && approval.Revoked,
-                "Revocation did not synchronously revoke incoming consent.");
-            approval.Answer.TrySetResult(true);
-            await ThrowsAny(() => acquire);
-            await Wait(() => local.Host.Connections.Count == 0 && local.Host.PeerConnections.Count == 0);
-            await Throws<AgentLinkException>(() => local.Client.CallAsync("describe", new TargetRequest(id), default));
+            await acquire;
+            Check(remote.Consent.HasDesktopLease && !remote.Consent.Requests.TryRead(out _), "Control needed a dialog.");
+            remote.Host.StopDesktopControl();
+            Check(!remote.Consent.HasDesktopLease && local.Host.Connections.Single().ConnectionId == id,
+                "Stopping input disconnected RDP.");
         });
-        await test("unknown peers cannot call catalog desktop agent task or approval RPC", async () =>
+        await test("pre-hello peers cannot call catalog desktop agent task or approval RPC", async () =>
         {
             await using var fixture = new Fixture();
             foreach (var method in new[]
@@ -290,27 +285,38 @@ internal static partial class BackendTests
             })
             {
                 await using var connection = await IncomingPeer.Connect(fixture);
-                await connection.Peer.CallAsync(new("protocol.hello", Json.Element(Hello(true))), default);
                 await ThrowsAny(() => connection.Peer.CallAsync(new(method, Json.Element(new { }), "claimed-actor"), default));
-                Check(!fixture.Consent.IsConnected && !fixture.Consent.Requests.TryRead(out _) &&
+                Check(!fixture.Consent.HasDesktopLease && !fixture.Consent.Requests.TryRead(out _) &&
                     fixture.Host.ListLocalTasks(false).Count == 0, $"Pending {method} reached a privileged operation.");
             }
         });
-        await test("pairing reconnect authorizes the channel but never restores a desktop grant", async () =>
+        await test("reconnect retains the same target with a fresh epoch and no old input", async () =>
         {
             await using var local = new Fixture();
             await using var remote = new Fixture();
+            string id;
+            string epoch;
             await using (var pending = await HostPair.Connect(local.Host, remote.Host))
             {
-                await Wait(() => Pending(local.Host) && Pending(remote.Host));
-                Pair(local, remote);
-                await Wait(() => local.Host.PeerConnections.Count == 0 && remote.Host.PeerConnections.Count == 0);
+                await Wait(() => Connected(local.Host) && Connected(remote.Host));
+                id = local.Host.Connections.Single().ConnectionId;
+                epoch = local.Host.Connections.Single().Epoch;
+                OperationContext.ActorId.Value = "old-owner";
+                await remote.Consent.RequestAsync(new("desktop-control", "test"), default);
             }
+            OperationContext.ActorId.Value = null;
             await using (var paired = await HostPair.Connect(local.Host, remote.Host))
             {
                 await Wait(() => Connected(local.Host) && Connected(remote.Host));
                 Check(remote.Consent.IsConnected && !remote.Consent.DesktopAllowed && !remote.Consent.ObservationAllowed,
-                    "Completing pairing silently approved desktop operations.");
+                    "Reconnect restored old input.");
+                var current = local.Host.Connections.Single();
+                Check(current.ConnectionId == id && current.Epoch != epoch,
+                    "Reconnect broke an existing fixed binding or reused a stale epoch.");
+                var selected = await local.Host.HandleLocalRequestAsync(new("get",
+                    Json.Element(new TargetRequest(id))), "test-client", default);
+                Check(selected.Data!.Value.GetProperty("connectionId").GetString() == id,
+                    "The original explicit target no longer resolves after reconnect.");
             }
             await using (var reconnected = await HostPair.Connect(local.Host, remote.Host))
             {
@@ -318,7 +324,7 @@ internal static partial class BackendTests
                 Check(!remote.Consent.DesktopAllowed && !remote.Consent.ObservationAllowed, "Reconnect restored an old permission.");
             }
         });
-        await test("paired agent creation still requires a human delegation decision", async () =>
+        await test("authenticated agent creation reaches setup checks without approval", async () =>
         {
             await using var fixture = new Fixture();
             using var certificate = Certificate();
@@ -327,13 +333,10 @@ internal static partial class BackendTests
             await connection.Peer.CallAsync(new("protocol.hello", Json.Element(Hello(true))), default);
             var creation = connection.Peer.CallAsync(new("agent_start_session",
                 Json.Element(new { workingDirectory = fixture.Workspace }), "agent-a"), default);
-            var pending = await fixture.Consent.Requests.ReadAsync();
-            Check(pending.Request.Capability == "agent-delegation" && !creation.IsCompleted &&
-                  fixture.Host.ListLocalTasks(false).Count == 0, "Pairing launched agent work without a human decision.");
-            pending.Answer.TrySetResult(false);
-            await Throws<AgentLinkException>(() => creation);
+            await ThrowsCode("runtime_not_configured", () => creation);
             Check(fixture.Host.ListLocalTasks(false).Count == 0 && !fixture.Consent.DesktopAllowed,
-                "Rejected delegation created work or a desktop grant.");
+                "Missing runtime setup created work or a desktop grant.");
+            Check(!fixture.Consent.Requests.TryRead(out _), "Runtime setup queued a permission dialog.");
         });
         await test("changing readiness metadata closes an authorized channel immediately", async () =>
         {
@@ -345,7 +348,7 @@ internal static partial class BackendTests
             Check(fixture.Consent.IsConnected, "Paired channel did not activate.");
             await ThrowsAny(() => connection.Peer.CallAsync(new("protocol.hello", Json.Element(Hello(false))), default));
             await Wait(() => fixture.Host.PeerConnections.Count == 0);
-            Check(!fixture.Consent.IsConnected, "Withdrawn peer readiness retained incoming authorization.");
+            Check(!fixture.Consent.HasDesktopLease, "Withdrawn peer readiness retained input.");
         });
         await test("throwing presentation observers cannot prevent backend revocation", async () =>
         {
@@ -356,8 +359,8 @@ internal static partial class BackendTests
             remote.Consent.Changed += () => throw new InvalidOperationException("test consent view");
             await using var connection = await HostPair.Connect(local.Host, remote.Host);
             await Wait(() => Connected(local.Host) && Connected(remote.Host));
-            remote.Identity.Revoke(local.Identity.Fingerprint);
-            Check(!remote.Consent.IsConnected && remote.Host.PeerConnections.Count == 0, "A view interrupted revocation.");
+            remote.Host.OnSessionUnavailable();
+            Check(!remote.Consent.HasDesktopLease && remote.Host.PeerConnections.Count == 0, "A view interrupted session revocation.");
             await Wait(() => local.Host.Connections.Count == 0);
         });
         await test("connecting channel state is bounded and cancels before TLS admission", async () =>
@@ -369,7 +372,7 @@ internal static partial class BackendTests
                 peer.Status == PeerConnectionStatus.Connecting && peer.Fingerprint.Length == 0), "Connecting channel state was incorrect.");
             using var extra = new WaitingStream();
             await Throws<AgentLinkException>(() => fixture.Host.HandleOutgoingChannelAsync(extra));
-            fixture.Identity.RevokeAll();
+            await fixture.Host.DisposeAsync();
             await Drain(connections);
             Check(fixture.Host.PeerConnections.Count == 0 && transports.All(stream => stream.Disposed),
                 "Pre-TLS channels survived cancellation or leaked transports.");
@@ -379,11 +382,11 @@ internal static partial class BackendTests
             await using var local = new Fixture();
             await using var remote = new Fixture();
             await using var connection = await HostPair.Connect(local.Host, remote.Host);
-            await Wait(() => Pending(local.Host) && Pending(remote.Host));
+            await Wait(() => Connected(local.Host) && Connected(remote.Host));
             remote.Host.OnSessionUnavailable();
-            Check(remote.Host.PeerConnections.Count == 0 && !remote.Consent.IsConnected, "Pending incoming channel survived session loss.");
+            Check(remote.Host.PeerConnections.Count == 0 && !remote.Consent.HasDesktopLease, "Incoming channel survived session loss.");
             await Wait(() => local.Host.PeerConnections.Count == 0);
-            Check(!local.Consent.IsConnected, "Outgoing channel promoted own-session availability after session loss.");
+            Check(local.Consent.IsConnected, "Remote session loss revoked independent local IPC.");
         });
         await test("authenticated pending peers still need private-key possession", async () =>
         {
@@ -395,7 +398,7 @@ internal static partial class BackendTests
                 await using var connection = await IncomingPeer.Connect(fixture, publicOnly);
                 await connection.Peer.CallAsync(new("protocol.hello", Json.Element(Hello(true))), default);
             });
-            Check(!fixture.Consent.IsConnected && fixture.Host.Connections.Count == 0, "A certificate without its private key authenticated.");
+            Check(fixture.Host.Connections.Count == 0 && !fixture.Consent.HasDesktopLease, "A certificate without its private key authenticated.");
         });
         await test("expired peers fail pending TLS before hello", async () =>
         {
@@ -406,9 +409,9 @@ internal static partial class BackendTests
                 await using var connection = await IncomingPeer.Connect(fixture, expired);
                 await connection.Peer.CallAsync(new("protocol.hello", Json.Element(Hello())), default);
             });
-            Check(!fixture.Consent.IsConnected, "Expired certificate enabled the session.");
+            Check(!fixture.Consent.HasDesktopLease, "Expired certificate enabled input.");
         });
-        await test("legacy incoming hello remains compatible only when locally paired", async () =>
+        await test("legacy incoming hello remains compatible on authenticated transport without pairing", async () =>
         {
             await using var fixture = new Fixture();
             using var certificate = Certificate();
@@ -428,8 +431,8 @@ internal static partial class BackendTests
             fixture.Identity.RevokeAll();
             await using (var connection = await IncomingPeer.Connect(fixture, certificate))
             {
-                await ThrowsAny(() => connection.Peer.CallAsync(new("protocol.hello", Json.Element(new { })), default));
-                Check(!fixture.Consent.IsConnected, "An unpaired legacy endpoint was admitted.");
+                await connection.Peer.CallAsync(new("protocol.hello", Json.Element(new { })), default);
+                Check(Connected(fixture.Host), "Authenticated legacy endpoint required a saved pin.");
             }
         });
         await test("original-shape strict hello rejects every unnegotiated metadata field", async () =>
@@ -457,7 +460,7 @@ internal static partial class BackendTests
                 Console.WriteLine("VERIFIED archived 0.1.0.1 AgentLink.Core.dll: Arguments.Read<EndpointHello> rejects unknown members, including null metadata.");
             }
         });
-        await test("legacy outgoing TLS and three-field hello remain compatible and fail closed without pin", async () =>
+        await test("legacy outgoing TLS and three-field hello remain compatible without pin", async () =>
         {
             await using var fixture = new Fixture();
             using var certificate = Certificate();
@@ -466,13 +469,13 @@ internal static partial class BackendTests
             {
                 await Wait(() => fixture.Host.Connections.Count == 1);
                 Check(fixture.Host.PeerConnections.Single().Status == PeerConnectionStatus.Connected &&
-                      !fixture.Consent.IsConnected, "Legacy outgoing state granted own-session availability.");
+                      !fixture.Consent.HasDesktopLease, "Legacy outgoing state granted input.");
             });
             fixture.Identity.RevokeAll();
             await WithLegacyServer(fixture, certificate, async () =>
             {
-                await Wait(() => fixture.Host.PeerConnections.Count == 0);
-                Check(fixture.Host.Connections.Count == 0, "Missing local pin was bypassed by a legacy response.");
+                await Wait(() => fixture.Host.Connections.Count == 1);
+                Check(Connected(fixture.Host), "Authenticated legacy response required a local pin.");
             });
         });
         await test("ui.show is isolated same-session control IPC and never grants permission", async () =>
@@ -483,7 +486,7 @@ internal static partial class BackendTests
             fixture.Host.Start();
             Check(fixture.Host.IsRunning, "Isolated listener did not start.");
             await fixture.Client.ShowAsync();
-            Check(shown == 1 && !fixture.Consent.IsConnected && !fixture.Consent.DesktopAllowed, "Show did not notify, or changed authorization.");
+            Check(shown == 1 && !fixture.Consent.HasDesktopLease, "Show did not notify, or changed input ownership.");
             foreach (var method in new[] { "approve", "trust", "revoke", "consent.approve" })
                 await Throws<AgentLinkException>(() => fixture.Client.CallAsync(method, new { }, default));
             await Throws<AgentLinkException>(() => fixture.Client.CallAsync("ui.show", new { approve = true }, default));
@@ -501,25 +504,21 @@ internal static partial class BackendTests
             Check(statuses > 0 && fixture.Host.LastTransportError!.Contains("restart", StringComparison.OrdinalIgnoreCase),
                 "Listener failure lacked an actionable status.");
         });
-        await test("disconnect drains pending approvals without granting delegation or unattended work", async () =>
+        await test("delegation and unattended work never populate approval queues", async () =>
         {
             var consent = new HumanConsent();
             consent.SetConnected(true);
             var approvals = Enumerable.Range(0, 16).Select(index =>
                 consent.RequestAsync(new("agent-delegation", $"test {index}", Unattended: true), default)).ToArray();
-            Check(approvals.All(approval => !approval.IsCompleted), "Unattended delegation bypassed consent.");
+            Check((await Task.WhenAll(approvals)).All(answer => answer), "Enabled delegation required approval.");
             consent.SetConnected(false);
-            Check((await Task.WhenAll(approvals)).All(answer => !answer) && !consent.Requests.TryRead(out _),
-                "Disconnect left stale approvals queued.");
+            Check(!consent.Requests.TryRead(out _), "Authorization populated the approval queue.");
             consent.SetConnected(true);
             var next = consent.RequestAsync(new("agent-delegation", "next"), default);
-            var pending = await consent.Requests.ReadAsync();
-            Check(!next.IsCompleted, "Reconnect implicitly approved agent delegation.");
-            pending.Answer.TrySetResult(false);
-            Check(!await next, "A rejected delegation was granted.");
+            Check(await next && !consent.Requests.TryRead(out _), "Reconnected delegation required a dialog.");
         });
         await RunFollowupAsync(test);
-        await RunDesktopAvailabilityAsync(test);
+        await RunClientConnectionsAsync(test);
     }
 
     private static EndpointHello Hello(bool trusted = false) => new(Wire.ProtocolVersion, 42, "S-1-5-5-1-2", "Test device", trusted, true);
@@ -538,8 +537,8 @@ internal static partial class BackendTests
         var sessions = await fixture.Client.CallAsync("invoke", new RoutedOperation(null, true,
             new("agent_list_sessions", Json.Element(new { }), Guid.NewGuid().ToString("N"))), default);
         Check(sessions.Data!.Value.GetProperty("sessions").GetArrayLength() == 0 &&
-            !fixture.Consent.IsConnected && !fixture.Consent.DesktopAllowed && !fixture.Consent.ObservationAllowed,
-            "Local metadata access implicitly granted permissions.");
+            fixture.Consent.IsConnected && !fixture.Consent.HasDesktopLease,
+            "Local metadata access acquired input.");
     }
     private static async Task Wait(Func<bool> predicate)
     {
@@ -593,24 +592,25 @@ internal static partial class BackendTests
         internal string DataDirectory => Path.Combine(_root, "tasks");
         internal string Workspace => Path.Combine(_root, "workspace");
         internal string ControlPipe { get; } = $"RemoteAgentLink.Test.Control.{Guid.NewGuid():N}";
+        internal string TransportPipe { get; } = $"RemoteAgentLink.Test.Transport.{Guid.NewGuid():N}";
         internal EndpointIdentity Identity { get; }
         internal HumanConsent Consent { get; } = new();
         internal BrokerHost Host { get; }
         internal AgentLink.Broker.Shell.BrokerSession Session { get; }
         internal BrokerClient Client => new(ControlPipe);
         internal int RemoteOpenAttempts => Volatile.Read(ref _remoteOpenAttempts);
-        internal Fixture(Action<EndpointIdentity>? beforeHost = null)
+        internal Fixture(Action<EndpointIdentity>? beforeHost = null, AgentLink.Copilot.ICopilotRuntimeFactory? runtimeFactory = null)
         {
             using var certificate = Certificate();
             Identity = new EndpointIdentity(IdentityDirectory, certificate);
             Directory.CreateDirectory(Workspace);
             beforeHost?.Invoke(Identity);
             Host = new(Identity, Consent, DataDirectory, "both",
-                new(ControlPipe, $"RemoteAgentLink.Test.Transport.{Guid.NewGuid():N}", () =>
+                new(ControlPipe, TransportPipe, () =>
                 {
                     Interlocked.Increment(ref _remoteOpenAttempts);
                     throw new IOException("Isolated test transport is idle.");
-                }));
+                }), runtimeFactory);
             Session = new(Identity, Consent, Host, DataDirectory, "both");
         }
         public async ValueTask DisposeAsync()

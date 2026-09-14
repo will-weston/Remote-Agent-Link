@@ -8,10 +8,8 @@ internal sealed class ShellLifetime
     public bool Hidden { get; private set; }
     public bool Quitting { get; set; }
     public bool SessionEnding { get; set; }
-    public bool ApprovalActive { get; set; }
     public int DialogDepth { get; private set; }
-    public bool IsPrompting => ApprovalActive || DialogDepth != 0;
-    public bool CanAllow => ApprovalActive && DialogDepth == 0 && !Quitting && !SessionEnding;
+    public bool IsPrompting => DialogDepth != 0;
 
     public CloseAction RequestClose()
     {
@@ -27,12 +25,6 @@ internal sealed class ShellLifetime
         return mustShow;
     }
     public void Show() => Hidden = false;
-    public bool TryReleaseApproval(bool protectedSurfaceHidden)
-    {
-        if (!CanAllow || !protectedSurfaceHidden) return false;
-        ApprovalActive = false;
-        return true;
-    }
     public void EnterDialog() => DialogDepth++;
     public void ExitDialog()
     {

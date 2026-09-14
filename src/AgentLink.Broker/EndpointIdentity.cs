@@ -58,10 +58,11 @@ internal sealed class EndpointIdentity : IDisposable
             Save();
         }
         if (DateTime.UtcNow < Certificate.NotBefore.ToUniversalTime() || DateTime.UtcNow >= Certificate.NotAfter.ToUniversalTime())
-            throw new InvalidOperationException("The endpoint certificate has expired or is not valid yet. Explicitly rotate and re-pair it.");
+            throw new InvalidOperationException("The endpoint certificate has expired or is not valid yet. Check the device clock or replace the expired endpoint identity.");
     }
 
     public X509Certificate2 Certificate { get; }
+    internal string StorageDirectory => Path.GetDirectoryName(_settingsPath)!;
     public string Fingerprint => FingerprintOf(Certificate);
     public event Action<string>? UntrustedPeer;
     public event Action? TrustChanged;
@@ -82,7 +83,8 @@ internal sealed class EndpointIdentity : IDisposable
     }
 
     // Channel authentication verifies certificate validity; SslStream still performs
-    // the TLS signatures/proof of possession. A channel is not operation admission.
+    // the TLS signatures/proof of possession. Admission additionally requires the
+    // existing authenticated same-logon DVC/WTS transport and endpoint hello.
     public bool ValidateChannelPeer(object sender, X509Certificate? certificate, X509Chain? chain, SslPolicyErrors errors) =>
         certificate is not null && IsCertificateCurrent(certificate, DateTime.UtcNow);
 
@@ -118,7 +120,6 @@ internal sealed class EndpointIdentity : IDisposable
 
     internal void AdmitChannel(X509Certificate certificate, Action<bool> register)
     {
-        RefreshTrust();
         PeerAdmission.AdmitChannel(_gate, () => _settings.TrustedFingerprints, certificate, register);
     }
 
@@ -223,7 +224,7 @@ internal sealed class EndpointIdentity : IDisposable
         var settings = JsonSerializer.Deserialize<IdentitySettings>(File.ReadAllText(_settingsPath), Json.Options)
             ?? throw new InvalidDataException("Invalid endpoint identity configuration.");
         if (settings.Thumbprint != Certificate.Thumbprint || settings.TrustedFingerprints is null)
-            throw new InvalidDataException("Endpoint identity changed. Restart the broker and explicitly re-pair.");
+            throw new InvalidDataException("Endpoint identity changed. Restore the expected identity and restart the broker.");
         return settings;
     }
 

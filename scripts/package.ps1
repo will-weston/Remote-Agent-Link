@@ -1,7 +1,7 @@
 #requires -Version 7.2
 param(
     [ValidateSet('Debug', 'Release')][string] $Configuration = 'Release',
-    [ValidatePattern('^\d+\.\d+\.\d+\.\d+$')][string] $Version = '0.4.0.1',
+    [ValidatePattern('^\d+\.\d+\.\d+\.\d+$')][string] $Version = '0.5.0.0',
     [string] $Publisher = 'CN=Remote Agent Link Development',
     [switch] $DevSign,
     [string] $SigningCertificateThumbprint,

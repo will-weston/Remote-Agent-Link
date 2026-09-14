@@ -1,6 +1,6 @@
 # Remote Agent Link
 
-An experimental Windows RDP dynamic-virtual-channel plugin that lets a local MCP client work with a remote desktop and remote GitHub Copilot sessions. Install the **same MSIX on both computers**. Windows App carries the connection; a separate per-user broker owns consent and durable work.
+An experimental Windows RDP dynamic-virtual-channel plugin that lets a local MCP client work with a remote desktop and remote GitHub Copilot sessions. Install the **same MSIX on both computers**. Windows App carries the connection; a separate per-user broker owns device access and durable work.
 
 **Pre-release:** the implementation and deterministic checks do not establish compatibility with a shipped Windows App build. Real Windows App/Windows 365 activation, clean-machine packaged COM marshalling, and authenticated interactive Copilot handoff require the acceptance procedure in [installation](docs/installation.md). Do not deploy this as an unattended production control service.
 
@@ -12,13 +12,38 @@ An experimental Windows RDP dynamic-virtual-channel plugin that lets a local MCP
 | --- | --- |
 | Native RDP plugin | Modern factory or legacy COM activation, both out of process, with a `RALink.v1` client listener |
 | Native transport DLL | Remote-session WTS channel and fragmentation handling |
-| Broker | Local IPC, paired mutual TLS, human permissions, desktop control, Copilot tasks |
+| Broker | Authenticated session IPC, TLS over RDP, device-access switch, desktop control, Copilot tasks |
 | MCP host | Official C# SDK, stdio, explicit per-process connection binding, actual PNG image blocks |
 | Desktop worker | Isolated, bounded UI Automation provider execution |
 
-The broker is a WinUI 3 desktop app with a Store-inspired navigation rail, a Home dashboard, device cards, and Agents, Activity and Settings pages. Channels connect automatically while the app is running. **Allow agents to use this desktop** enables approval requests, not control; turning it off stops and blocks agent observation/input here without disconnecting RDP or stopping separately approved coding tasks. Closing hides to the notification area; the tray provides Open, Activity, Block agent desktop access on this PC, and Quit.
+The WinUI 3 app shows this device, connected computers, and connected MCP agents.
+**Allow agents to use this device** defaults to **Yes**. There is no fingerprint
+pairing or per-action broker approval. **No** blocks agent access, revokes desktop
+control and requests cancellation of broker-owned coding work without closing
+RDP. Closing the window keeps the app in the notification area.
 
-An agent cannot discover the tray process as an MCP server. **Agents** registers `ralink-mcp.exe` with Copilot CLI and explains the checked profile, manual setup and client reload. Each client starts its own stdio MCP process; adding that configuration never grants permissions.
+This deliberately trusts the authenticated RDP session and signed-in Windows
+user. Enabled agents can use the supported desktop and coding operations with
+that user's rights; enable access only on devices and sessions you trust.
+
+An agent cannot discover the tray process as an MCP server. **Setup** registers `ralink-mcp.exe` with Copilot CLI and keeps manual MCP configuration available. Each client starts its own stdio MCP process. Saved configuration and a connected agent are displayed separately.
+
+All **32 MCP tools** are declared from startup. Binding, access changes and
+disconnects never remove screenshot, input or agent tools from the catalog.
+An invocation still requires the correct target, endpoint support and enabled
+device access. No catalog refresh is needed after binding.
+
+`rdp_list_connections` also reports **local RDP plugin instances without a
+working DVC or remote broker**. These have `targetKind: "localRdpClient"`,
+an opaque per-instance ID, and an independent lifecycle state. They can be
+explicitly bound, but are currently **discovery-only**: local RDP-surface
+capture/input is not implemented, and remote desktop/agent tools are unsupported
+on these entries. Authenticated brokers remain separate `remoteEndpoint`
+targets; binding never silently switches between them. See the
+[public API contract gaps](src/Native/README.md#local-rdp-surface-control-contract-gap).
+An optional public window-service probe now reports per-instance geometry and
+failure diagnostics. A service HWND is not proof of exact connection identity;
+background input and fresh minimized capture remain unsupported.
 
 **Settings > RDP client loading** defaults to Modern. On Windows 11, Legacy compatibility registers a per-user COM entry for compatible classic RDP clients, without loading a plugin DLL into the client. Restart the RDP client after switching; permissions and the remote endpoint are unchanged. See [loader selection and cleanup](docs/installation.md#modern-and-legacy-rdp-loading). Automatic legacy registration adds a narrowly scoped restricted capability whose Microsoft Store approval is still an open gate.
 
@@ -38,10 +63,15 @@ The build uses Microsoft's public `dotnet-public` NuGet mirror; no internal sour
 
 ## Use
 
-1. Install the package on both endpoints and explicitly start the broker in each logged-in user session.
-2. The default `both` role handles local and remote connections automatically. Open Windows App, connect to the remote desktop, and review the device on **Home**. Compare full endpoint fingerprints through trusted UI and pair both sides.
-3. Use a ready device's **Copy MCP configuration** action, or configure `ralink-mcp.exe` as below. With general configuration, discover connections using `rdp_list_connections` and explicitly call `rdp_bind_connection`.
-4. Use **Review request** on the controlled device to approve observation, control, delegation, and unattended work separately.
+1. Install and open Remote Agent Link on both computers. Device access starts at **Yes**; no pairing is needed.
+2. Connect with Windows App. Authenticated broker peers appear on **Home**.
+   MCP also discovers initialized local plugin instances independently of peers.
+3. Use **Setup > Add to Copilot CLI**, or the MCP configuration below. Restart the agent to load it.
+
+The agent selects the intended computer using `rdp_list_connections` and
+`rdp_bind_connection`, observes its screen, then reserves input with
+`rdp_acquire_control`. This does not open an approval dialog or preempt another
+agent. Turn the device switch to **No** to stop access.
 
 ```json
 {
@@ -56,11 +86,11 @@ The build uses Microsoft's public `dotnet-public` NuGet mirror; no internal sour
 }
 ```
 
-Each MCP process binds to one connection; use another process for another target. A remote CLI can explicitly use `["--current-session"]` instead. This does not bypass the same consent arbiter or allow disconnected desktop control.
+Each MCP process binds to one connection; use another process for another target. A remote CLI can explicitly use `["--current-session"]` instead. This does not bypass the device switch or allow disconnected desktop control. Never use it or a local shell as a fallback for a failed remote action.
 
-To save a specific target in your MCP configuration, set `args` to `["--connection", "<connectionId>"]`, using the exact ID returned by `rdp_list_connections`. Its tools load when that endpoint is available; the MCP process will never substitute another desktop, even if the configured endpoint is offline. Reconnecting to the same Windows logon retains the target. After remote logoff or identity replacement, explicitly choose the new connection ID. `--connection` and `--current-session` cannot be combined.
+To save a specific target in your MCP configuration, set `args` to `["--connection", "<connectionId>"]`, using the exact ID returned by `rdp_list_connections`. Its declarations remain available even when the endpoint is offline; the MCP process will never substitute another desktop. Reconnecting to the same Windows logon retains the target. After remote logoff or identity replacement, explicitly choose the new connection ID. `--connection` and `--current-session` cannot be combined.
 
-RDP disconnect revokes desktop access. Only separately preauthorized non-UI tasks may continue while the remote user stays logged in; reconnect retrieves existing task IDs and events rather than resubmitting prompts. The remote user's Copilot authentication remains remote.
+RDP disconnect revokes desktop control. Only explicitly scoped unattended non-UI tasks may continue while the remote user stays logged in and device access remains enabled; reconnect retrieves existing task IDs and events rather than resubmitting prompts. The remote user's Copilot authentication remains remote.
 
 See [installation and recovery](docs/installation.md), [architecture](docs/architecture.md), [protocol](docs/protocol.md), [API compatibility](docs/api-compatibility.md), and [security](docs/security.md).
 

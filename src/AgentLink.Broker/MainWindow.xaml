@@ -11,6 +11,7 @@
         <NavigationView x:Name="Navigation" Grid.Row="1" PaneDisplayMode="Left" IsPaneOpen="True"
                         IsPaneToggleButtonVisible="False" IsBackButtonVisible="Collapsed"
                         IsSettingsVisible="False" SelectionChanged="NavigationChanged" ItemInvoked="NavigationInvoked" AlwaysShowHeader="False"
+                        IsTitleBarAutoPaddingEnabled="False"
                         OpenPaneLength="88" CompactPaneLength="88" CompactModeThresholdWidth="0" ExpandedModeThresholdWidth="0">
             <NavigationView.Resources>
                 <Thickness x:Key="NavigationViewItemContentPresenterMargin">0</Thickness>
@@ -22,10 +23,10 @@
                         <TextBlock Text="Home" FontSize="12" HorizontalAlignment="Center" TextWrapping="Wrap" TextAlignment="Center" />
                     </StackPanel>
                 </NavigationViewItem>
-                <NavigationViewItem x:Name="AgentsNavigation" Style="{StaticResource RailItemStyle}" AutomationProperties.Name="Agents">
+                <NavigationViewItem x:Name="AgentsNavigation" Style="{StaticResource RailItemStyle}" AutomationProperties.Name="Copilot and MCP setup">
                     <StackPanel Spacing="6" HorizontalAlignment="Center">
                         <FontIcon Glyph="&#xE8F2;" FontSize="22" />
-                        <TextBlock Text="Agents" FontSize="12" HorizontalAlignment="Center" TextWrapping="Wrap" TextAlignment="Center" />
+                        <TextBlock Text="Setup" FontSize="12" HorizontalAlignment="Center" TextWrapping="Wrap" TextAlignment="Center" />
                     </StackPanel>
                 </NavigationViewItem>
                 <NavigationViewItem x:Name="ActivityNavigation" Style="{StaticResource RailItemStyle}" AutomationProperties.Name="Activity">
@@ -54,19 +55,11 @@
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="*" />
                 </Grid.RowDefinitions>
-                <StackPanel Spacing="8" Margin="12,0,20,0">
-                    <ScrollViewer MaxHeight="220" HorizontalScrollBarVisibility="Disabled">
-                        <StackPanel Spacing="8">
-                            <InfoBar IsOpen="{x:Bind Model.HasNotice, Mode=OneWay}" Message="{x:Bind Model.Notice, Mode=OneWay}"
-                                     Severity="Informational" IsClosable="True" Closed="NoticeClosed" />
-                            <InfoBar IsOpen="{x:Bind Model.HasApproval, Mode=OneWay}" Title="Your approval is needed"
-                                     Message="An agent is waiting. Review the identity, capability and scope before deciding."
-                                     Severity="Warning" IsClosable="False" AutomationProperties.LiveSetting="Assertive">
-                                <InfoBar.ActionButton>
-                                    <Button Click="ReviewClicked"><TextBlock Text="Review request" TextWrapping="Wrap" /></Button>
-                                </InfoBar.ActionButton>
-                            </InfoBar>
-                        </StackPanel>
+                <StackPanel Margin="16,0,16,0">
+                    <ScrollViewer MaxHeight="140" HorizontalScrollBarVisibility="Disabled"
+                                  Visibility="{x:Bind Model.HasNotice, Mode=OneWay}">
+                        <InfoBar IsOpen="{x:Bind Model.HasNotice, Mode=OneWay}" Message="{x:Bind Model.Notice, Mode=OneWay}"
+                                 Severity="Informational" IsClosable="True" Closed="NoticeClosed" />
                     </ScrollViewer>
                     <ProgressBar IsIndeterminate="True" Visibility="{x:Bind Model.IsBusy, Mode=OneWay}" AutomationProperties.Name="Stopping the broker" />
                 </StackPanel>

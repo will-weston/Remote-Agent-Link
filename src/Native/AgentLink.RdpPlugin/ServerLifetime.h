@@ -7,6 +7,19 @@ namespace ral {
 inline HANDLE ServerShutdownEvent{};
 inline std::atomic<unsigned long> ServerLeaseCount{};
 
+inline HRESULT WaitForServerShutdown(HANDLE shutdown, DWORD idleTimeoutMs = 60000) noexcept {
+    for (;;) {
+        const auto waited = WaitForSingleObject(shutdown, idleTimeoutMs);
+        if (waited == WAIT_OBJECT_0) return S_OK;
+        if (waited != WAIT_TIMEOUT) return HRESULT_FROM_WIN32(GetLastError());
+        // CoReleaseServerProcess atomically suspends activation only at zero.
+        // Do not suspend/resume busy classes: resuming an already-published class
+        // can fail and must not tear down objects that still have client references.
+        CoAddRefServerProcess();
+        if (CoReleaseServerProcess() == 0) return S_OK;
+    }
+}
+
 class ServerLease {
 public:
     ServerLease() noexcept {

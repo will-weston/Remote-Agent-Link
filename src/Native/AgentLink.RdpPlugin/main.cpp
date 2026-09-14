@@ -37,17 +37,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int) {
     if (SUCCEEDED(result) && !checkStartup) result = CoResumeClassObjects();
     if (SUCCEEDED(result) && !checkStartup) {
         // Avoid an abandoned activation leaving an unused process running forever.
-        for (;;) {
-            const auto waited = WaitForSingleObject(shutdown.get(), 60000);
-            if (waited == WAIT_OBJECT_0) break;
-            if (waited != WAIT_TIMEOUT) { result = HRESULT_FROM_WIN32(GetLastError()); break; }
-            result = CoSuspendClassObjects();
-            if (FAILED(result)) break;
-            CoAddRefServerProcess();
-            if (CoReleaseServerProcess() == 0) break;
-            result = CoResumeClassObjects();
-            if (FAILED(result)) break;
-        }
+        result = ral::WaitForServerShutdown(shutdown.get());
     }
     CoSuspendClassObjects();
     for (size_t i = registrations.size(); i-- > 0;) {

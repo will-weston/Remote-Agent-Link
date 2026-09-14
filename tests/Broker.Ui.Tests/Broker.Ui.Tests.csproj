@@ -6,6 +6,7 @@
     <Compile Include="..\..\src\AgentLink.Broker\ViewModels\ShellLifetime.cs" Link="Models\ShellLifetime.cs" />
     <Compile Include="..\..\src\AgentLink.Broker\ViewModels\ShellViewModel.cs" Link="Models\ShellViewModel.cs" />
     <Compile Include="..\..\src\AgentLink.Broker\ViewModels\PeerViewModel.cs" Link="Models\PeerViewModel.cs" />
+    <Compile Include="..\..\src\AgentLink.Broker\ViewModels\AgentConnectionViewModel.cs" Link="Models\AgentConnectionViewModel.cs" />
     <Compile Include="..\..\src\AgentLink.Broker\ViewModels\McpConfiguration.cs" Link="Models\McpConfiguration.cs" />
     <Compile Include="..\..\src\AgentLink.Broker\ViewModels\McpSetup.cs" Link="Models\McpSetup.cs" />
     <Compile Include="..\..\src\AgentLink.Broker\ViewModels\SettingsViewModel.cs" Link="Models\SettingsViewModel.cs" />

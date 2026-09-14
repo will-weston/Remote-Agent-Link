@@ -36,12 +36,12 @@ Run `.\scripts\test.ps1 -Suite Signing -SkipBuild` for isolated signing regressi
 
 ## Install the same package on both endpoints
 
-Compare the package digest through your trusted distribution channel. For a development package only, an administrator can inspect and explicitly trust the public signing certificate in the appropriate Windows Trusted People store. Do not confuse this package-signing certificate with the separate endpoint pairing certificates.
+Compare the package digest through your trusted distribution channel. For a development package only, an administrator can inspect and explicitly trust the public signing certificate in the appropriate Windows Trusted People store. Do not confuse package signing with the separate endpoint TLS identities. A future Store distribution uses Store installation/signing; this repository has not been submitted or approved.
 
 Install the signed package using Windows App Installer or:
 
 ```powershell
-Add-AppxPackage -Path .\RemoteAgentLink_0.4.0.1_x64.msix
+Add-AppxPackage -Path .\RemoteAgentLink_0.5.0.0_x64.msix
 ```
 
 Installation does not enable legacy AddIns registration. Modern is the default;
@@ -57,7 +57,40 @@ ralink-broker.exe --role remote
 ralink-broker.exe --role both
 ```
 
-Only one broker runs per Windows user/session. Opening the application again requests the existing window through authenticated local IPC. Installation does not start it or grant permissions. The optional packaged startup task is disabled by default; **Settings** shows its current Windows state and opens Startup Apps for explicit opt-in. Organization/user-disabled startup is not bypassed. Startup uses the default `both` role.
+Only one broker runs per Windows user/session. Opening the application again requests the existing window through authenticated local IPC. Installation alone does not start the remote broker; open it once on each computer. **Allow agents to use this device** defaults to **Yes**. There is no pairing or per-action broker approval. The optional packaged startup task is disabled by default; **Settings** shows its current Windows state and opens Startup Apps for explicit opt-in. Organization/user-disabled startup is not bypassed. Startup uses the default `both` role.
+
+Update **both endpoints** when moving from a pairing-based release to 0.5.0.0.
+The simplified model trusts the authenticated RDP session and Windows user rather
+than a separately approved fingerprint. Enabled agents can use supported desktop
+and scoped coding operations without a broker prompt. Existing running processes
+do not change behavior merely because a new package was built.
+
+### DVC-independent MCP discovery
+
+Update the local broker, native plugin and MCP together, then restart the RDP
+client to load the new plugin code. Once the RDP client initializes a plugin,
+MCP can list its `localRdpClient` instance without a working `RALink.v1` channel
+or remote broker. Starting the local broker afterward also works: initialized
+plugins retry their lifecycle pipe. This does not force Windows App to load
+an extension it has not chosen to initialize; on-demand activation remains
+client-controlled. Sixteen concurrent lifecycle reporters are admitted, with
+excess reporters retrying rather than taking over an existing pipe.
+
+These entries report initialized/connected/disconnected state and can be bound
+by exact ID, but **local RDP rendering/input remains unsupported**. Do not
+interpret a connected lifecycle as working desktop tools. For the currently
+implemented remote desktop/agent operations, both endpoint brokers and the
+authenticated DVC remain necessary; select the separate `remoteEndpoint` ID.
+The existing Home peer view describes those authenticated channels.
+The [native contract investigation](../src/Native/README.md#local-rdp-surface-control-contract-gap)
+records the remaining blocker, not a claim of completed local control.
+
+Approved live acceptance must verify local-only discovery with the remote
+broker stopped, two plugin instances in one RDP process, disconnected-state
+reporting, broker restart, and entry removal after plugin termination. Binding
+the client entry must never start controlling the host desktop or a newly
+arriving remote endpoint. The isolated native lifecycle and managed tests are
+not evidence that a shipped RDP client invokes the required lifecycle callbacks.
 
 Use the registered `ralink-mcp.exe` execution alias for installed MCP clients, not the versioned executable path under `WindowsApps`. Direct execution can run without package identity and fail dependency loading even when the DLL exists. Installed acceptance must check the MCP process's actual package identity as well as its tool responses; a loose-file launch is not equivalent to package activation.
 
@@ -66,7 +99,7 @@ Use the registered `ralink-mcp.exe` execution alias for installed MCP clients, n
 In **Settings > RDP client loading**, **Use modern RDP plugin loading** is On by
 default. Off selects **Legacy compatibility** for outgoing RDP connections on
 this PC, for this Windows account. It is independent of the local/remote broker
-role and the desktop-access switch. A remote endpoint that only accepts incoming
+role and the device-access switch. A remote endpoint that only accepts incoming
 channels needs no matching loader selection.
 
 | Mode | Discovery and activation |
@@ -133,7 +166,7 @@ universal shipped-client support guarantee.
 
 The tray application is the **broker**, not a listening MCP server. Each MCP client starts a separate stdio process; it cannot discover the broker as an HTTP endpoint or attach to another client's stdin/stdout.
 
-Open **Agents** in the app and choose **Add to Copilot CLI**, or run:
+Open **Setup** in the app and choose **Add to Copilot CLI**, or run:
 
 ```powershell
 copilot mcp add remote-agent-link -- "$env:LOCALAPPDATA\Microsoft\WindowsApps\ralink-mcp.exe"
@@ -141,32 +174,76 @@ copilot mcp add remote-agent-link -- "$env:LOCALAPPDATA\Microsoft\WindowsApps\ra
 
 This uses the official CLI to register the stable execution alias, without changing desktop permissions. The app leaves existing/custom entries alone. Start a new Copilot CLI session and use `/mcp show remote-agent-link` to inspect its loaded server. A saved configuration is not proof that an already-running agent has reloaded it.
 
-Discovery mode initially exposes five connection-management tools, not the full desktop catalog. Pair both devices, call `rdp_list_connections`, then `rdp_bind_connection` with the selected ID. The server announces a changed tool list after successful binding. An empty connection list before pairing does not mean the MCP process is missing. The separate `--current-session` mode reaches this PC's broker and is not remote-device discovery.
+All 32 tools are declared from startup, including screenshots, mouse/keyboard and
+agent operations. `rdp_list_connections` discovers computers;
+`rdp_bind_connection` chooses the exact target and checks endpoint support.
+Binding never adds/removes declarations or emits `notifications/tools/list_changed`.
+A successful bind preserves connection identity and reports the endpoint's
+supported tool names. No host catalog refresh is needed.
 
-The default user profile is `%USERPROFILE%\.copilot`; `COPILOT_HOME` selects a different profile. The Agents page shows the profile it checked. Workspace configuration, disabled-server settings and enterprise policy can override user configuration. Other MCP clients have their own configuration stores; `.vscode\mcp.json` is not Copilot CLI configuration. The manual setup section provides JSON and explains `--current-session` versus remote-device discovery.
+The same declarations remain available while unbound, offline or blocked.
+Invocation returns an explicit `not_bound`, `unsupported_on_endpoint`,
+`device_access_disabled` or connection error as appropriate. A dedicated drawing
+command is unnecessary: use screenshot and input tools on the selected computer.
 
-### Allow agents on this desktop
+An MCP host's stale/cached-tool error is not proof that RDP disconnected. Inspect
+`rdp_get_connection` without changing targets, then report the problem rather
+than switching to a local shell or coding-agent workaround. `--current-session`
+explicitly selects the machine running that MCP process; it is never a fallback
+for an unavailable remote desktop. A fixed `--connection <connectionId>` remains
+available for saved target configuration, not as a catalog-cache workaround.
+
+Home reports connected agents separately from saved MCP setup and RDP computers.
+Each initialized MCP process registers authenticated presence, refreshes it every
+15 seconds, and unregisters on clean shutdown. Missing heartbeats expire after
+45 seconds; an abrupt process exit can therefore remain visible briefly.
+
+The default user profile is `%USERPROFILE%\.copilot`; `COPILOT_HOME` selects a different profile. The Setup page shows the profile it checked. Workspace configuration, disabled-server settings and enterprise policy can override user configuration. Other MCP clients have their own configuration stores; `.vscode\mcp.json` is not Copilot CLI configuration. The manual setup section provides JSON and explains `--current-session` versus remote-device discovery.
+
+### Allow agents to use this device
 
 The **Home** switch applies to the Windows desktop where this app is running, identified by its PC name:
 
-- **On / Ask for approval:** agents may request access. This does not grant screen viewing or mouse/keyboard control, pair a device, or authorize coding tasks.
-- **Off / Blocked:** immediately stop and block agent observation and input on this desktop. Existing desktop approvals are invalidated. RDP connections, other PCs and separately approved non-UI coding tasks remain running.
+- **Yes (default):** allow supported desktop and scoped coding operations over this authenticated RDP/Windows session without pairing or per-action broker dialogs.
+- **No:** block new agent operations on this device, revoke desktop control and request cancellation of broker-owned coding work. RDP connections, other enabled computers and external user apps stay open. Cancellation does not undo completed effects.
 
-The setting is saved for this Windows logon and survives broker restarts. Turning it back on does not restore old grants. The tray action **Block agent desktop access on this PC** and `Ctrl+Alt+Pause` use the same Off behavior. Normal RDP disconnect still revokes desktop grants; it does not change the saved switch value.
+The saved choice is per Windows user/device, at the endpoint identity's private
+storage root in `desktop-access.json`, and survives logon/broker restarts. When
+that root setting is absent, migration inspects legacy session settings: any
+explicit No wins; malformed or unreadable data fails closed. The new root setting
+is authoritative thereafter, and legacy files are left intact.
+Other running logons for this Windows user reread the shared preference before
+executing agent operations and reconcile active work within one second. An
+unreadable or missing live preference blocks access. A failed-save No stays
+effective in that broker rather than reverting to an older saved Yes.
+Turning it back on does not restore old leases or restart cancelled
+work. The tray block action and `Ctrl+Alt+Pause` use the same No behavior. Normal
+RDP disconnect still revokes desktop leases without changing the saved switch.
+The MCP host's own permissions and enterprise runtime requirements remain
+separate; this switch does not disable them.
 
 On the remote machine, start the broker inside the actual logged-in RDP session, not an administrative service or Session 0. Closing the window hides it to the notification area and leaves authorized work running. If its tray icon is unavailable, the window minimizes to the taskbar instead. Explorer/icon loss restores a reachable control surface. **Quit** deliberately stops the broker and confirms when work or control would be interrupted; Windows logoff/shutdown is not vetoed.
 
-## Pair and bind
+## Connect and use
 
-1. Connect with the target Windows App build. Both brokers must already be running. **Home** shows outgoing remote desktops and incoming agent channels, including those awaiting pairing.
-2. Open device verification, compare all 64 fingerprint characters against the other device's **Settings**, and explicitly confirm. Pair both directions. Device names are labels supplied by peers, not identity proof. Manual fingerprint entry remains available in Settings for older endpoints.
-3. Copy the selected ready device's MCP configuration, or configure the general MCP host as shown in the repository README. Fixed-target configurations use the real MCP connection ID, not a transient channel/card ID.
-4. Call `rdp_list_connections`, choose the intended fingerprint/logon, and call `rdp_bind_connection`.
-5. Approve each requested capability on the controlled endpoint. Pairing alone authorizes neither desktop input nor agent execution.
+1. Open the app on both computers and connect through Windows App. **Home** shows connected computers and agents; no Verify or Pair step is needed.
+2. Keep the intended device's switch at **Yes**. Configure Copilot through **Setup**, or use a computer's MCP configuration in connection details.
+3. The agent calls `rdp_list_connections`, selects the intended `connectionId`, and calls `rdp_bind_connection`. A configured fixed target skips this selection step, never silently choosing another computer.
+4. Observe with `take_screenshot` or `get_screen_size`, then reserve mouse/keyboard control with `rdp_acquire_control` and use the input tools. Control acquisition has no approval dialog and does not preempt another agent.
 
-An approval banner opens the window but does not decide for the human. Choose **Review request** to see the actor, capability, workspace and unattended scope. **Allow and minimize** hides the protected approval window before releasing the operation; Deny rejects it and Later leaves it pending. Restore the broker from its tray icon or Start for desktop access, pairing, or status. Captures intersecting visible broker UI are deliberately rejected.
+After opening or activating an app, observe its controls before sending further
+input. A visible window title does not prove that a newly launched app is ready.
+Use `get_accessibility_tree` or `take_screenshot`, then observe the result after
+input: a successful injection response is not an acknowledgement from the app.
+Release control when the task is finished.
 
-Turning off the controlled endpoint's desktop-access switch or pressing Ctrl+Alt+Pause blocks access to **that desktop**. Neither grants control to a different agent. The same actor must acquire a fresh lease after access is re-enabled, disconnect, lock, or revocation.
+Restore the app from its tray icon or Start to view connections or block access.
+Captures intersecting visible broker UI are deliberately rejected to protect its
+local access/setup controls; minimize it before computer-use actions.
+
+Turning off the controlled endpoint's device-access switch or pressing
+Ctrl+Alt+Pause blocks access to **that device**. The same actor must obtain fresh
+input ownership and observation after disconnect, lock or revocation.
 
 To configure a remote CLI to use its own broker directly, use `ralink-mcp.exe --current-session`. This is a separate MCP process, not a recursive connection back to the local computer.
 
@@ -182,7 +259,7 @@ Use only a compatible CLI/runtime with an explicitly supported authenticated ser
 
 ## Disconnect, updates, and recovery
 
-Desktop operations stop on disconnect or unavailable desktop. Non-UI jobs continue only under prior unattended approval and finite policy/budget. New approvals need an available human; there is no out-of-band status or cancellation channel to the disconnected local machine.
+Desktop operations stop on disconnect or unavailable desktop. Non-UI jobs continue only under an explicitly scoped unattended task and finite policy/budget while device access remains enabled. Unsupported scope/managed-policy requests cannot be turned into silent approvals. There is no out-of-band status or cancellation channel to the disconnected local machine.
 
 Reconnect to the same authenticated logon and retrieve the existing task ID/events. Do not resubmit a prompt simply because its acknowledgement was lost. An interrupted/unknown dispatch requires reconciliation, not an automatic retry.
 
@@ -194,19 +271,23 @@ For a local client update, also close its RDP connection windows and allow the p
 
 Use the data-folder action in **Settings** to locate the actual writable directory. Packaged Windows apps may virtualize AppData; do not assume an unpackaged shell sees the same path. Back up required task outputs before uninstalling. Uninstall may remove package-owned writable data; it is not a guaranteed archival mechanism. User endpoint certificates are separate and should be removed only through an explicit user-managed rotation/cleanup procedure.
 
-For identity rotation, stop every broker for that user, preserve needed task data, remove or archive the old `identity.json`, and restart to create a new endpoint identity. Re-pair both sides. Do not delete unrelated certificates or user data.
+For identity rotation, stop every broker for that user, preserve needed task data, remove or archive the old `identity.json`, and restart to create a new endpoint identity. Select the resulting new connection ID explicitly; no fingerprint pairing is required. Old principal-owned tasks do not automatically transfer to a replacement identity. Do not delete unrelated certificates or user data.
 
 ## Required real-environment acceptance
 
 ### Current preview evidence
 
-The `0.3.0.4` package is installed on two Windows VMs using the original signing certificate. A supplied developer preview RDCore client, not a supported shipped-client release, exercised automatic pending-peer discovery and reconnection. The Store-inspired WinUI shell renders on both endpoints. Compact layout was exercised at 480 by 400 pixels, including multiline notices: notices no longer shrink the navigation rail or hide its actions. Closing hides to the tray and packaged reopening restores the same broker. The current Open, Activity and desktop-block tray actions were exercised on both endpoints; normal Quit and earlier tray Quit coverage remain separate from forcibly replacing a running package.
+The earlier `0.3.0.4` package was installed on two Windows VMs using the original
+signer. A supplied developer-preview RDCore client exercised real channel
+discovery/reconnection; packaged WinUI, tray behavior, 480x400 layout, saved MCP
+setup and execution-alias identity were exercised. That release used pairing,
+per-action approvals and a changing MCP catalog. Its evidence does **not**
+validate the 0.5.0.0 access model or redesigned dashboard.
 
-The official Copilot CLI registration is saved in each VM's standard profile. The installed **Agents** setup action was exercised, including a separate temporary local profile. On both endpoints, the configured execution alias starts with the expected package identity and exposes the five discovery tools. Current-session mode exposes 32 tools and reaches the authenticated same-session broker. Existing agent processes still need to load their new configuration.
-
-The installed desktop switch and tray block action reject current-session control acquisition with `desktop_access_disabled`. Off was retained across broker restarts and package updates during this refinement; re-enabling clears the obsolete block notice without restoring grants. Both endpoints were returned to **On / Ask for approval**. No endpoint trust or capability was approved by the assistant. The channel remains pending until device verification is complete.
-
-This does **not** establish paired remote desktop control, clipboard support, a live model request, or unattended-task continuation. Those remain separate consent and acceptance gates below.
+The new build requires its own installed two-endpoint acceptance. Source changes
+or a signed artifact are not evidence that already-running brokers/MCP clients
+have been updated. Shipped-client support, live Copilot work and unattended
+continuation remain separate gates below.
 
 ### Release gates
 
@@ -218,7 +299,11 @@ The following cannot be inferred from protocol fakes or a custom sample client:
 | Clean-machine installation | One MSIX on each endpoint, proxy activation without prior COM registration, native dependencies present |
 | Legacy loading | Windows 11 external visibility of the owned AddIns entry, compatible client's direct OOP COM activation, real channel/reconnect, Modern cleanup and no duplicate listener |
 | Store capability | Explicit approval of the scoped `unvirtualizedResources` scenario and an accepted uninstall/identity migration policy |
+| Simple access | Fresh default Yes, no pairing/dialogs on both endpoints, No blocks desktop/coding access and cancels owned work while RDP stays up, correct agent presence |
 | Desktop correctness | Benign app, DPI/multi-monitor/negative-origin correspondence, layout invalidation, lock/UAC behavior, human Stop |
+| Local client surface identity | Public service availability on the exact shipped version; multiple same-process connections, window recreation/reuse and independent identity corroboration. Current metadata deliberately reports ambiguous identity. |
+| Background client input | Public acquisition of the exact existing connection's input destination; keys/chords/Unicode/mouse while another app has focus and while minimized, with no global input or local side effects |
+| Fresh minimized capture | Controlled remote visual changes while actually minimized, current pixels and protected-UI exclusion; cached frames, successful HWND lookup or capture callbacks are insufficient |
 | Managed Copilot | Authenticated remote prompt/result, permissions, questions, cancellation, and working-directory policy |
 | Live interactive Copilot | Supported runtime/version, authenticated registration, explicit session handoff, busy rejection, process preserved on detach |
 | Disconnect continuation | One preauthorized non-UI task, disconnect, reconnect, same task result without redispatch, no restored desktop lease |

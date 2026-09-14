@@ -16,6 +16,12 @@ internal sealed record BrokerTransportOptions(string ControlPipe, string Transpo
 internal sealed class BrokerHost : IAsyncDisposable
 {
     private sealed record Link(ConnectionInfo Info, PeerChannel Channel, RpcPeer Peer);
+    private sealed class ClientConnection(ConnectionInfo info, string reporterIdentity)
+    {
+        internal ConnectionInfo Info = info;
+        internal readonly string ReporterIdentity = reporterIdentity;
+        internal object? SurfaceOwner;
+    }
     private readonly EndpointIdentity _identity;
     private readonly HumanConsent _consent;
     private readonly DesktopAccessSettings _desktopAccessSettings;
@@ -24,10 +30,14 @@ internal sealed class BrokerHost : IAsyncDisposable
     private readonly CopilotOperations _copilot;
     private readonly Dictionary<string, IOperationHandler> _operations;
     private readonly ConcurrentDictionary<string, Link> _links = new();
+    private readonly ConcurrentDictionary<string, ClientConnection> _clientConnections = new();
     private readonly ConcurrentDictionary<string, PeerChannel> _channels = new();
+    private readonly AgentPresenceRegistry _agents = new();
     private readonly ConcurrentDictionary<Guid, Task> _sessions = new();
     private readonly CancellationTokenSource _stop = new();
     private readonly SemaphoreSlim _connectionSlots = new(16, 16);
+    private readonly SemaphoreSlim _clientConnectionSlots = new(16, 16);
+    private readonly SemaphoreSlim _clientSurfaceSlots = new(16, 16);
     private readonly SemaphoreSlim _channelSlots = new(17, 17);
     private readonly bool _localRole;
     private readonly bool _remoteRole;
@@ -36,31 +46,33 @@ internal sealed class BrokerHost : IAsyncDisposable
     private Task[] _listenerObservers = [];
     private readonly object _remoteGate = new();
     private PeerChannel? _remotePeer;
-    private CancellationToken _desktopConnection = new(true);
     private int _started;
     private int _running;
     private int _disposed;
     private string? _lastTransportError;
+    private string? _deviceAccessFailure;
+    private bool _unsavedDeviceBlock;
 
     public BrokerHost(EndpointIdentity identity, HumanConsent consent, string dataDirectory, string role,
-        BrokerTransportOptions? transport = null)
+        BrokerTransportOptions? transport = null, ICopilotRuntimeFactory? runtimeFactory = null)
     {
         if (role is not ("local" or "remote" or "both"))
             throw new ArgumentException("The broker role must be local, remote or both.", nameof(role));
         _identity = identity;
         _consent = consent;
         _consent.SetDesktopAccessState(false);
-        _desktopAccessSettings = new DesktopAccessSettings(dataDirectory);
+        _desktopAccessSettings = new DesktopAccessSettings(identity.StorageDirectory, dataDirectory);
         _consent.SetDesktopAccessState(_desktopAccessSettings.Read());
+        _consent.SetConnectionState(true);
         _localRole = role is "local" or "both";
         _remoteRole = role is "remote" or "both";
         _transport = transport ?? new(PipeNames.Control, PipeNames.Transport, () => new WtsStream());
         _desktop = new DesktopOperations(consent);
-        _copilot = new CopilotOperations(consent, dataDirectory);
+        _copilot = runtimeFactory is null ? new CopilotOperations(consent, dataDirectory) :
+            new CopilotOperations(consent, dataDirectory, runtimeFactory);
         _operations = new[] { (IOperationHandler)_desktop, _copilot }
             .SelectMany(handler => handler.Tools.Select(tool => (tool.Name, handler)))
             .ToDictionary(entry => entry.Name, entry => entry.handler, StringComparer.Ordinal);
-        _identity.TrustChanged += RevokeConnections;
     }
 
     public event Action<string>? Log;
@@ -70,15 +82,9 @@ internal sealed class BrokerHost : IAsyncDisposable
     public string? LastTransportError => Volatile.Read(ref _lastTransportError);
     public IReadOnlyList<PeerConnectionSnapshot> PeerConnections => _channels.Values
         .Where(channel => !channel.Closed).Select(channel => channel.Snapshot).OrderBy(peer => peer.ConnectedAt).ToArray();
-    public IReadOnlyList<ConnectionInfo> Connections
-    {
-        get
-        {
-            _identity.RefreshTrust();
-            var pins = _identity.TrustedFingerprints.ToHashSet(StringComparer.Ordinal);
-            return _links.Values.Where(link => pins.Contains(link.Info.PeerFingerprint) && link.Channel.Ready).Select(link => link.Info).ToArray();
-        }
-    }
+    public IReadOnlyList<ConnectionInfo> Connections => _links.Values.Where(link => link.Channel.Ready).Select(link => link.Info)
+        .Concat(_clientConnections.Values.Select(client => Volatile.Read(ref client.Info))).ToArray();
+    public IReadOnlyList<AgentConnectionSnapshot> GetAgentConnections() => _agents.Snapshot();
     public IReadOnlyList<AgentTask> ListLocalTasks(bool activeOnly, string? beforeTaskId = null) =>
         _copilot.ListLocalTasks(activeOnly: activeOnly, beforeTaskId: beforeTaskId);
     public AgentTask GetLocalTask(string taskId) => _copilot.GetLocalTask(taskId);
@@ -92,9 +98,13 @@ internal sealed class BrokerHost : IAsyncDisposable
         if (Interlocked.Exchange(ref _started, 1) != 0)
             return;
         Volatile.Write(ref _running, 1);
-        List<Task> listeners = [PipeLoopAsync(_transport.ControlPipe, HandleLocalPipeAsync)];
+        List<Task> listeners = [PipeLoopAsync(_transport.ControlPipe, HandleLocalPipeAsync), MonitorDeviceAccessAsync()];
         if (_localRole)
+        {
             listeners.Add(PipeLoopAsync(_transport.TransportPipe, HandleTransportPipeAsync));
+            listeners.Add(PipeLoopAsync(_transport.TransportPipe + ".Clients", HandleClientConnectionPipeAsync, _clientConnectionSlots));
+            listeners.Add(ListenClientSurfacesAsync());
+        }
         if (_remoteRole)
             listeners.Add(RemoteLoopAsync());
         _listeners = listeners.ToArray();
@@ -113,16 +123,19 @@ internal sealed class BrokerHost : IAsyncDisposable
             Raise(StatusChanged);
             WriteLog($"Listener failed: {exception.GetType().Name}");
             await _stop.CancelAsync();
+            _consent.SetConnected(false);
+            _copilot.OnConnectionChanged(false);
             RevokeConnections();
         }
     }
 
-    private async Task PipeLoopAsync(string name, Func<NamedPipeServerStream, Task> handler)
+    private async Task PipeLoopAsync(string name, Func<NamedPipeServerStream, Task> handler, SemaphoreSlim? slots = null)
     {
+        slots ??= _connectionSlots;
         var firstInstance = true;
         while (!_stop.IsCancellationRequested)
         {
-            await _connectionSlots.WaitAsync(_stop.Token);
+            await slots.WaitAsync(_stop.Token);
             NamedPipeServerStream? pipe = null;
             var handedOff = false;
             try
@@ -132,7 +145,7 @@ internal sealed class BrokerHost : IAsyncDisposable
                 await pipe.WaitForConnectionAsync(_stop.Token);
                 var id = Guid.NewGuid();
                 var accepted = pipe;
-                var task = RunPipeAsync(accepted, handler);
+                var task = RunPipeAsync(accepted, handler, slots);
                 _sessions[id] = task;
                 _ = task.ContinueWith(_ => _sessions.TryRemove(id, out var ignored),
                     CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
@@ -143,13 +156,13 @@ internal sealed class BrokerHost : IAsyncDisposable
                 if (!handedOff)
                 {
                     pipe?.Dispose();
-                    _connectionSlots.Release();
+                    slots.Release();
                 }
             }
         }
     }
 
-    private async Task RunPipeAsync(NamedPipeServerStream pipe, Func<NamedPipeServerStream, Task> handler)
+    private async Task RunPipeAsync(NamedPipeServerStream pipe, Func<NamedPipeServerStream, Task> handler, SemaphoreSlim slots)
     {
         try
         {
@@ -165,7 +178,7 @@ internal sealed class BrokerHost : IAsyncDisposable
         finally
         {
             pipe.Dispose();
-            _connectionSlots.Release();
+            slots.Release();
         }
     }
 
@@ -179,6 +192,156 @@ internal sealed class BrokerHost : IAsyncDisposable
     }
 
     private Task HandleTransportPipeAsync(NamedPipeServerStream pipe) => HandleOutgoingChannelAsync(pipe);
+
+    private async Task HandleClientConnectionPipeAsync(NamedPipeServerStream pipe)
+    {
+        try { await HandleClientConnectionAsync(pipe, ReporterIdentity(pipe)); }
+        catch (Exception exception) when (exception is IOException or AgentLinkException or OperationCanceledException)
+        {
+            WriteLog($"Local RDP lifecycle reporter closed: {exception.GetType().Name}");
+        }
+    }
+
+    private static string ReporterIdentity(NamedPipeServerStream pipe)
+    {
+        var processId = PipeSecurity.VerifyLocalSession(pipe);
+        using var process = Process.GetProcessById((int)processId);
+        return $"{processId}:{process.StartTime.ToUniversalTime().Ticks}";
+    }
+
+    internal async Task HandleClientConnectionAsync(Stream transport, string reporterIdentity = "test-stream")
+    {
+        ClientConnection? client = null;
+        string? id = null;
+        try
+        {
+            while (true)
+            {
+                using var deadline = CancellationTokenSource.CreateLinkedTokenSource(_stop.Token);
+                deadline.CancelAfter(TimeSpan.FromSeconds(15));
+                var report = await ClientConnectionReport.ReadAsync(transport, deadline.Token);
+                if (report is null)
+                    return;
+                var info = report.ToConnection();
+                if (client is null)
+                {
+                    id = info.ConnectionId;
+                    client = new(info, reporterIdentity);
+                    if (!_clientConnections.TryAdd(id, client))
+                        throw new AgentLinkException("duplicate_connection", "Another reporter owns this RDP client instance.");
+                }
+                else
+                {
+                    if (info.ConnectionId != id)
+                        throw new AgentLinkException("invalid_client_report", "A lifecycle stream cannot change its selected instance.");
+                    lock (client)
+                    {
+                        var previous = client.Info;
+                        if (previous.Epoch == info.Epoch && info.State == "connected")
+                            info = info with { LocalSurface = previous.LocalSurface, LocalSurfaceStatus = previous.LocalSurfaceStatus };
+                        Volatile.Write(ref client.Info, info);
+                        if (previous == info)
+                            continue;
+                    }
+                }
+                Raise(StatusChanged);
+            }
+        }
+        finally
+        {
+            if (client is not null && id is not null &&
+                _clientConnections.TryRemove(new KeyValuePair<string, ClientConnection>(id, client)))
+                Raise(StatusChanged);
+        }
+    }
+
+    private async Task HandleClientSurfacePipeAsync(NamedPipeServerStream pipe)
+    {
+        try { await HandleClientSurfaceAsync(pipe, ReporterIdentity(pipe)); }
+        catch (Exception exception) when (exception is IOException or AgentLinkException or OperationCanceledException)
+        {
+            WriteLog($"Local RDP surface reporter closed: {exception.GetType().Name}");
+        }
+    }
+
+    private async Task ListenClientSurfacesAsync()
+    {
+        try
+        {
+            await PipeLoopAsync(_transport.TransportPipe + ".Clients.Surfaces", HandleClientSurfacePipeAsync, _clientSurfaceSlots);
+        }
+        catch (OperationCanceledException) when (_stop.IsCancellationRequested) { }
+        catch (Exception exception)
+        {
+            // The diagnostic plane is optional; never take lifecycle discovery
+            // or authenticated desktop transport down with it.
+            WriteLog($"Local RDP surface listener unavailable: {exception.GetType().Name}");
+        }
+    }
+
+    internal async Task HandleClientSurfaceAsync(Stream transport, string reporterIdentity = "test-stream")
+    {
+        var owner = new object();
+        ClientConnection? bound = null;
+        Guid? instance = null;
+        ClientSurfaceReport? previous = null;
+        try
+        {
+            while (true)
+            {
+                using var deadline = CancellationTokenSource.CreateLinkedTokenSource(_stop.Token);
+                deadline.CancelAfter(TimeSpan.FromSeconds(15));
+                var report = await ClientSurfaceReport.ReadAsync(transport, deadline.Token);
+                if (report is null)
+                    return;
+                if ((instance is not null && instance != report.Instance) ||
+                    (previous is not null && previous.Epoch == report.Epoch &&
+                     (previous.Surface.Generation > report.Surface.Generation ||
+                      (previous.Surface.Generation == report.Surface.Generation && previous != report))))
+                    throw new AgentLinkException("invalid_surface_report", "A surface stream cannot retarget or regress its generation.");
+                instance = report.Instance;
+                previous = report;
+                if (!_clientConnections.TryGetValue($"rdp-client:{report.Instance:N}", out var client))
+                    continue; // Lifecycle publication can race this independent optional stream.
+                if (client.ReporterIdentity != reporterIdentity || (bound is not null && bound != client))
+                    throw new AgentLinkException("invalid_surface_report", "Surface metadata must belong to the same lifecycle reporter.");
+                lock (client)
+                {
+                    if (client.Info.Epoch != report.Epoch.ToString("N") || client.Info.State != "connected")
+                        continue;
+                    if (client.SurfaceOwner is not null && client.SurfaceOwner != owner)
+                        throw new AgentLinkException("duplicate_surface_report", "Another stream owns this surface metadata.");
+                    bound = client;
+                    client.SurfaceOwner = owner;
+                    Volatile.Write(ref client.Info, client.Info with
+                    {
+                        LocalSurface = report.Surface,
+                        LocalSurfaceStatus = report.Surface.Status
+                    });
+                }
+                Raise(StatusChanged);
+            }
+        }
+        finally
+        {
+            if (bound is not null)
+            {
+                lock (bound)
+                {
+                    if (bound.SurfaceOwner == owner)
+                    {
+                        bound.SurfaceOwner = null;
+                        Volatile.Write(ref bound.Info, bound.Info with
+                        {
+                            LocalSurface = null,
+                            LocalSurfaceStatus = "unsupported_public_contract"
+                        });
+                    }
+                }
+                Raise(StatusChanged);
+            }
+        }
+    }
 
     internal async Task HandleOutgoingChannelAsync(Stream transport)
     {
@@ -287,19 +450,24 @@ internal sealed class BrokerHost : IAsyncDisposable
                         throw;
                     }
                 }
-                Task<OperationResult>? invocation = null;
                 var fingerprint = channel.Snapshot.Fingerprint;
-                _identity.WithTrustedFingerprint(fingerprint, () =>
+                channel.RequireReady();
+                operation.Token.ThrowIfCancellationRequested();
+                if (request.Method != "tools.list" && request.ActorId is not { Length: > 0 and <= 256 })
+                    throw new AgentLinkException("invalid_actor", "A bounded agent identity is required.");
+                Interlocked.Exchange(ref lastRequest, Stopwatch.GetTimestamp());
+                var actor = $"remote:{channel.Id}:{fingerprint}:{request.ActorId}";
+                if (request.Method == "mcp.presence")
                 {
-                    channel.RequireReady();
-                    operation.Token.ThrowIfCancellationRequested();
-                    if (request.Method != "tools.list" && request.ActorId is not { Length: > 0 and <= 256 })
-                        throw new AgentLinkException("invalid_actor", "A bounded agent identity is required.");
-                    Interlocked.Exchange(ref lastRequest, Stopwatch.GetTimestamp());
-                    invocation = DispatchAsync(request with { ActorId = $"remote:{fingerprint}:{request.ActorId}" },
-                        operation.Token, channel.Lifetime, $"remote:{fingerprint}");
-                });
-                return await invocation!;
+                    var presence = Arguments.Read<McpPresenceRequest>(request.Arguments);
+                    if (presence.ActorId != request.ActorId || presence.ConnectionId is not null || presence.CurrentSession)
+                        throw new AgentLinkException("invalid_actor", "Presence must match the authenticated channel actor and cannot be forwarded again.");
+                    channel.WithReady(() => _agents.Update(actor, channel.Snapshot.DisplayName, channel.Id, presence.Connected));
+                    Raise(StatusChanged);
+                    return new(Text: "Agent presence updated.");
+                }
+                return await DispatchAsync(request with { ActorId = actor },
+                    operation.Token, channel.Lifetime, RemotePrincipal(channel));
             });
             try
             {
@@ -362,7 +530,6 @@ internal sealed class BrokerHost : IAsyncDisposable
                 if (await Task.WhenAny(peer.Completion, delay) == peer.Completion)
                     return;
                 await delay;
-                _identity.RefreshTrust();
                 monitor.Token.ThrowIfCancellationRequested();
                 if (!EndpointIdentity.IsCertificateCurrent(channel.Certificate, DateTime.UtcNow))
                     throw new AuthenticationException("The channel certificate expired.");
@@ -379,8 +546,22 @@ internal sealed class BrokerHost : IAsyncDisposable
         finally { await monitor.CancelAsync(); }
     }
 
-    private async Task<OperationResult> HandleLocalRequestAsync(OperationRequest request, string clientIdentity, CancellationToken cancellationToken)
+    internal async Task<OperationResult> HandleLocalRequestAsync(OperationRequest request, string clientIdentity, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (request.Method == "mcp.presence")
+        {
+            var presence = Arguments.Read<McpPresenceRequest>(request.Arguments);
+            var actor = StampLocalActor(clientIdentity, presence.ActorId);
+            if (presence.CurrentSession && presence.ConnectionId is not null)
+                throw new AgentLinkException("invalid_arguments", "Current-session presence cannot select a remote connection.");
+            _agents.Update($"local:{actor}", Environment.MachineName, null, presence.Connected);
+            Raise(StatusChanged);
+            if (presence.ConnectionId is not null && !_clientConnections.ContainsKey(presence.ConnectionId))
+                await ForwardAsync(GetLink(presence.ConnectionId), new("mcp.presence",
+                    Json.Element(new McpPresenceRequest(actor, null, false, presence.Connected)), actor), cancellationToken);
+            return new(Text: "Agent presence updated.");
+        }
         if (request.Method == "ui.show")
         {
             ChannelProtocol.RequireEmpty(request.Arguments);
@@ -393,14 +574,21 @@ internal sealed class BrokerHost : IAsyncDisposable
         if (request.Method == "invoke")
         {
             var route = Arguments.Read<RoutedOperation>(request.Arguments);
-            if (!Guid.TryParseExact(route.Request.ActorId, "N", out _))
-                throw new AgentLinkException("invalid_actor", "A valid MCP instance identity is required.");
-            var ownedRequest = route.Request with { ActorId = $"{clientIdentity}:{route.Request.ActorId}" };
+            var ownedRequest = route.Request with { ActorId = StampLocalActor(clientIdentity, route.Request.ActorId) };
             if (route.CurrentSession)
             {
-                if (!_remoteRole)
-                    throw new AgentLinkException("role_disabled", "Own-session operations require the remote broker role.");
+                if (route.ConnectionId is not null)
+                    throw new AgentLinkException("invalid_arguments", "Current-session operations cannot select a remote connection.");
                 return await InvokeCurrentAsync(ownedRequest with { ActorId = $"local:{ownedRequest.ActorId}" }, cancellationToken);
+            }
+            if (route.ConnectionId is not null && _clientConnections.ContainsKey(route.ConnectionId))
+            {
+                RefreshDeviceAccess();
+                if (!_consent.DeviceAccessEnabled)
+                    throw new AgentLinkException("device_access_disabled", "Agents are not allowed to use this device.");
+                throw new AgentLinkException("unsupported_on_endpoint",
+                    "This local RDP client instance has no supported connection-bound capture/input contract. " +
+                    "Remote broker tools belong to a separately selected authenticated endpoint; no local desktop fallback is allowed.");
             }
             return await ForwardAsync(GetLink(route.ConnectionId), ownedRequest, cancellationToken);
         }
@@ -409,16 +597,18 @@ internal sealed class BrokerHost : IAsyncDisposable
         {
             if (target.CurrentSession)
                 return new(Data: Json.Element(new { currentSession = true, connected = _consent.IsConnected, sessionId = Process.GetCurrentProcess().SessionId }));
+            if (target.ConnectionId is not null && _clientConnections.TryGetValue(target.ConnectionId, out var client))
+                return new(Data: Json.Element(Volatile.Read(ref client.Info)));
             return new(Data: Json.Element(GetLink(target.ConnectionId).Info));
         }
         if (request.Method == "describe")
         {
             if (target.CurrentSession)
             {
-                if (!_remoteRole)
-                    throw new AgentLinkException("role_disabled", "Own-session operations require the remote broker role.");
                 return await InvokeCurrentAsync(new("tools.list", Json.Element(new { })), cancellationToken);
             }
+            if (target.ConnectionId is not null && _clientConnections.ContainsKey(target.ConnectionId))
+                return new(Data: Json.Element(Array.Empty<ToolDefinition>()));
             return await ForwardAsync(GetLink(target.ConnectionId), new("tools.list", Json.Element(new { }),
                 $"catalog:{clientIdentity}"), cancellationToken);
         }
@@ -429,7 +619,6 @@ internal sealed class BrokerHost : IAsyncDisposable
     {
         if (id is null || !_links.TryGetValue(id, out var link))
             throw new AgentLinkException("disconnected", "The selected authenticated remote logon is not connected.");
-        _identity.RequireTrustedFingerprint(link.Info.PeerFingerprint);
         link.Channel.RequireReady();
         return link;
     }
@@ -437,24 +626,26 @@ internal sealed class BrokerHost : IAsyncDisposable
     private async Task<OperationResult> ForwardAsync(Link link, OperationRequest request, CancellationToken cancellationToken)
     {
         using var operation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, link.Channel.Lifetime);
-        Task<OperationResult>? invocation = null;
-        _identity.WithTrustedFingerprint(link.Info.PeerFingerprint, () =>
-        {
-            link.Channel.RequireReady();
-            operation.Token.ThrowIfCancellationRequested();
-            invocation = link.Peer.CallAsync(request, operation.Token);
-        });
-        return await invocation!;
+        link.Channel.RequireReady();
+        operation.Token.ThrowIfCancellationRequested();
+        return await link.Peer.CallAsync(request, operation.Token);
     }
 
     private Task<OperationResult> InvokeCurrentAsync(OperationRequest request, CancellationToken cancellationToken)
     {
-        CancellationToken desktopConnection;
-        lock (_remoteGate) desktopConnection = _desktopConnection;
-        // The same-user/session control pipe is authenticated independently of
-        // RDP. Only desktop work inherits the incoming channel's lifetime.
-        return DispatchAsync(request, cancellationToken, desktopConnection, $"local:{LogonId}");
+        // Local same-logon IPC does not inherit a different computer's RDP lifetime.
+        return DispatchAsync(request, cancellationToken, _stop.Token, $"local:{LogonId}");
     }
+
+    internal static string StampLocalActor(string clientIdentity, string? actor)
+    {
+        if (!Guid.TryParseExact(actor, "N", out var instance))
+            throw new AgentLinkException("invalid_actor", "A valid MCP instance identity is required.");
+        return $"{clientIdentity}:{instance:N}";
+    }
+
+    private static string RemotePrincipal(PeerChannel channel) =>
+        $"remote:{channel.Snapshot.Fingerprint}";
 
     private OperationResult Catalog() => new(Data: Json.Element(_desktop.Tools.Concat(_copilot.Tools).ToArray()));
 
@@ -465,6 +656,10 @@ internal sealed class BrokerHost : IAsyncDisposable
         cancellationToken.ThrowIfCancellationRequested();
         if (request.Method == "tools.list")
             return Catalog();
+        RefreshDeviceAccess();
+        using var access = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _consent.DeviceAccessLifetime);
+        cancellationToken = access.Token;
+        cancellationToken.ThrowIfCancellationRequested();
         if (request.Method == "desktop.release")
         {
             _consent.ReleaseDesktop();
@@ -474,8 +669,8 @@ internal sealed class BrokerHost : IAsyncDisposable
         if (request.Method == "desktop.acquire")
         {
             using var availability = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _consent.DesktopAccessLifetime);
-            if (!await _consent.RequestAsync(new("desktop-control", "Allow this paired agent to operate your desktop until disconnect or Stop?"), availability.Token))
-                throw new AgentLinkException("permission_denied", "The human declined desktop control.");
+            if (!await _consent.RequestAsync(new("desktop-control", "Acquire exclusive desktop input."), availability.Token))
+                throw new AgentLinkException("permission_denied", "Desktop input is not currently available.");
             availability.Token.ThrowIfCancellationRequested();
             return new(Text: "Desktop control granted until disconnect or human revocation.");
         }
@@ -504,6 +699,7 @@ internal sealed class BrokerHost : IAsyncDisposable
         StopDesktopControl();
         foreach (var channel in _channels.Values.Where(channel => channel.Snapshot.Direction == PeerDirection.IncomingAgent))
             CloseChannel(channel);
+        Raise(StatusChanged);
     }
 
     public void StopDesktopControl()
@@ -520,15 +716,18 @@ internal sealed class BrokerHost : IAsyncDisposable
             lock (_desktopAccessGate)
             {
                 if (Volatile.Read(ref _disposed) != 0)
-                    throw new AgentLinkException("broker_stopping", "Desktop availability cannot be changed while the broker is stopping.");
+                    throw new AgentLinkException("broker_stopping", "Device access cannot be changed while the broker is stopping.");
                 if (!enabled)
                 {
-                    changed = _consent.SetDesktopAccessState(false);
-                    _desktop.InvalidateObservations();
+                    _unsavedDeviceBlock = true;
+                    changed = ApplyDeviceAccessState(false);
                 }
                 _desktopAccessSettings.Save(enabled);
+                _unsavedDeviceBlock = false;
                 if (enabled)
-                    changed = _consent.SetDesktopAccessState(true);
+                {
+                    changed = ApplyDeviceAccessState(true);
+                }
             }
         }
         finally
@@ -536,6 +735,49 @@ internal sealed class BrokerHost : IAsyncDisposable
             if (changed)
                 _consent.NotifyChanged();
         }
+    }
+
+    private bool ApplyDeviceAccessState(bool enabled)
+    {
+        var changed = _consent.SetDesktopAccessState(enabled);
+        if (!enabled) _desktop.InvalidateObservations();
+        _copilot.OnDeviceAccessChanged(enabled);
+        return changed;
+    }
+
+    private void RefreshDeviceAccess()
+    {
+        var changed = false;
+        lock (_desktopAccessGate)
+        {
+            if (Volatile.Read(ref _disposed) != 0) return;
+            bool enabled;
+            try
+            {
+                enabled = _desktopAccessSettings.ReadCurrent();
+                if (!enabled) _unsavedDeviceBlock = false;
+                if (_unsavedDeviceBlock) enabled = false;
+                if (_deviceAccessFailure is not null) WriteLog("Shared device access settings are available again.");
+                _deviceAccessFailure = null;
+            }
+            catch (AgentLinkException exception)
+            {
+                enabled = false;
+                if (_deviceAccessFailure != exception.Code)
+                    WriteLog($"Agent access blocked: {exception.Code}. Repair the shared device preference.");
+                _deviceAccessFailure = exception.Code;
+            }
+            if (_consent.DeviceAccessEnabled != enabled)
+                changed = ApplyDeviceAccessState(enabled);
+        }
+        if (changed) _consent.NotifyChanged();
+    }
+
+    private async Task MonitorDeviceAccessAsync()
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+        while (await timer.WaitForNextTickAsync(_stop.Token))
+            RefreshDeviceAccess();
     }
 
     private PeerChannel AddChannel(PeerDirection direction)
@@ -572,9 +814,7 @@ internal sealed class BrokerHost : IAsyncDisposable
             if (_remotePeer is not null && !ReferenceEquals(_remotePeer, channel))
                 throw new AgentLinkException("duplicate_connection", "An incoming channel already owns this Windows session.");
             _remotePeer = channel;
-            _desktopConnection = channel.Lifetime;
-            _consent.SetConnectionState(true);
-            _copilot.OnConnectionChanged(true);
+            _copilot.OnPrincipalConnected(RemotePrincipal(channel));
         }
     }
 
@@ -590,15 +830,16 @@ internal sealed class BrokerHost : IAsyncDisposable
     {
         if (!channel.Close())
             return;
+        _agents.Disconnect(channel.Id);
         var consentChanged = false;
         lock (_remoteGate)
         {
             if (ReferenceEquals(_remotePeer, channel))
             {
                 _remotePeer = null;
-                _desktopConnection = new(true);
-                consentChanged = _consent.SetConnectionState(false);
-                _copilot.OnConnectionChanged(false);
+                _copilot.OnPrincipalDisconnected(RemotePrincipal(channel));
+                _consent.RevokeDesktop();
+                consentChanged = true;
                 _desktop.InvalidateObservations();
             }
         }
@@ -619,10 +860,10 @@ internal sealed class BrokerHost : IAsyncDisposable
 
     private static string TransportError(Exception exception) => exception switch
     {
-        AuthenticationException => "TLS authentication failed. Check device clocks and certificate validity; older endpoints must already be paired.",
-        AgentLinkException { Code: "pairing_required" or "untrusted_peer" } => "Pair the endpoint fingerprints on both devices, then reconnect.",
+        AuthenticationException => "TLS authentication failed. Check device clocks, certificate validity and that both endpoints are up to date.",
+        AgentLinkException { Code: "channel_not_ready" } => "The authenticated channel is not ready. Update both endpoints and reconnect.",
         AgentLinkException { Code: "invalid_metadata" or "protocol_mismatch" } => "The peer uses unsupported channel metadata. Update both endpoints and reconnect.",
-        OperationCanceledException => "The channel closed or timed out. Check the RDP connection and pairing on both devices.",
+        OperationCanceledException => "The channel closed or timed out. Check the RDP connection on both devices.",
         _ => "The RDP channel is unavailable. Check the Remote Desktop connection and that Remote Agent Link is installed on both devices."
     };
 
@@ -661,7 +902,6 @@ internal sealed class BrokerHost : IAsyncDisposable
             if (Interlocked.Exchange(ref _disposed, 1) != 0)
                 return;
         }
-        _identity.TrustChanged -= RevokeConnections;
         Volatile.Write(ref _running, 0);
         await _stop.CancelAsync();
         _consent.SetConnected(false);

@@ -75,7 +75,7 @@ internal static class ChannelProtocol
         else if (request.Method == "protocol.ping")
             RequireEmpty(request.Arguments);
         else
-            throw new AgentLinkException("pairing_required", "Pair both endpoints before using tools or forwarding operations.");
+            throw new AgentLinkException("channel_not_ready", "Exchange authenticated endpoint metadata before using operations.");
     }
 
     internal static void ValidatePendingFrame(WireMessage message)

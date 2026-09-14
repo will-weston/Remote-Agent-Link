@@ -16,9 +16,8 @@
                     <TextBlock Text="Windows contrast themes and text size settings are respected." Style="{StaticResource BodyText}" />
                 </StackPanel>
             </Border>
-            <Border Style="{StaticResource CardStyle}">
+            <Expander Header="Advanced: RDP client loading" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
                 <StackPanel Spacing="12">
-                    <TextBlock Text="RDP client loading" Style="{StaticResource SubtitleTextBlockStyle}" TextWrapping="Wrap" />
                     <ToggleSwitch x:Name="ModernPluginLoading" Header="Use modern RDP plugin loading"
                                   OnContent="Modern (recommended)" OffContent="Legacy compatibility"
                                   IsOn="True" IsEnabled="False" Toggled="PluginLoadingChanged"
@@ -34,12 +33,12 @@
                     <TextBlock Text="Restart your RDP client after changing modes. Existing connections, remote-endpoint discovery and permissions stay unchanged. Switch back to Modern before uninstalling to remove the legacy entry."
                                Style="{StaticResource BodyText}" />
                 </StackPanel>
-            </Border>
+            </Expander>
             <Border Style="{StaticResource CardStyle}">
                 <StackPanel Spacing="12">
                     <TextBlock Text="Start with Windows" Style="{StaticResource SubtitleTextBlockStyle}" TextWrapping="Wrap" />
                     <TextBlock Text="{x:Bind Model.StartupStatus, Mode=OneWay}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
-                    <TextBlock Text="Off until you opt in. Startup uses the automatic local-and-remote role; it never grants permissions." Style="{StaticResource BodyText}" />
+                    <TextBlock Text="Startup follows Windows settings. The broker starts in the local-and-remote role and remembers your device-access choice." Style="{StaticResource BodyText}" />
                     <Button Click="StartupClicked"><TextBlock Text="Open Windows Startup Apps" TextWrapping="Wrap" /></Button>
                     <Button Click="RefreshStartupClicked"><TextBlock Text="Refresh startup status" TextWrapping="Wrap" /></Button>
                 </StackPanel>
@@ -50,7 +49,7 @@
                     <TextBlock Text="{x:Bind Model.RuntimeRequirement}" TextWrapping="Wrap" />
                     <TextBlock Text="{x:Bind Model.RuntimeStatus, Mode=OneWay}" Style="{StaticResource BodyText}" />
                     <Button Click="RuntimeClicked"><TextBlock Text="Choose installed runtime (.exe)…" TextWrapping="Wrap" /></Button>
-                    <TextBlock Text="Live interactive attachment is unavailable: the pinned SDK has no verified policy-preserving exclusive handoff. Managed tasks need separate human approval and the remote user’s own authentication."
+                    <TextBlock Text="Managed tasks use the remote user’s Copilot sign-in while device access is Yes. They may consume that account’s credits. Attaching to an existing interactive CLI is not supported."
                                Style="{StaticResource BodyText}" />
                 </StackPanel>
             </Border>
@@ -68,37 +67,16 @@
                              PlaceholderText="Copy the connection ID returned by rdp_list_connections"
                              TextWrapping="Wrap" />
                     <Button Click="CopyMcpClicked"><TextBlock Text="Copy MCP configuration" TextWrapping="Wrap" /></Button>
-                    <TextBlock Text="The packaged ralink-mcp.exe alias must be installed. A fixed target is never silently replaced by another device. Configuration does not grant any capability."
+                    <TextBlock Text="The packaged ralink-mcp.exe alias must be installed. A fixed target is never silently replaced by another computer. Saving configuration is not an active agent connection."
                                Style="{StaticResource BodyText}" />
                 </StackPanel>
             </Border>
-            <Expander Header="Device identity and pairing" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
-                <StackPanel Spacing="16">
-                    <TextBlock Text="Device names are labels, not proof of identity. Compare the complete certificate SHA-256 on both devices through a trusted connection. Pairing never grants desktop or agent permissions."
-                               Style="{StaticResource BodyText}" />
-                    <TextBox Text="{x:Bind Model.Fingerprint}" Header="This device’s certificate SHA-256" IsReadOnly="True" TextWrapping="Wrap" />
-                    <Button Click="CopyFingerprintClicked"><TextBlock Text="Copy this fingerprint" TextWrapping="Wrap" /></Button>
-                    <TextBox x:Name="ManualFingerprint" Header="Other device’s certificate SHA-256" PlaceholderText="Manual pairing fallback" TextWrapping="Wrap" />
-                    <Button Click="PairClicked"><TextBlock Text="Review and pair fingerprint…" TextWrapping="Wrap" /></Button>
-                    <TextBlock Text="Trusted fingerprints" Style="{StaticResource BodyStrongTextBlockStyle}" TextWrapping="Wrap" />
-                    <ListView x:Name="TrustedList" ItemsSource="{x:Bind Model.TrustedFingerprints}" SelectionMode="Single"
-                              MaxHeight="240" AutomationProperties.Name="Trusted device fingerprints">
-                        <ListView.ItemTemplate>
-                            <DataTemplate x:DataType="x:String">
-                                <TextBlock Text="{x:Bind}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
-                            </DataTemplate>
-                        </ListView.ItemTemplate>
-                    </ListView>
-                    <Button Click="RevokeClicked"><TextBlock Text="Revoke selected device…" TextWrapping="Wrap" /></Button>
-                    <Button Click="RevokeAllClicked"><TextBlock Text="Revoke all paired devices…" TextWrapping="Wrap" /></Button>
-                </StackPanel>
-            </Expander>
             <Expander Header="Local storage and endpoint details" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
                 <StackPanel Spacing="12">
                     <TextBlock Text="{x:Bind Model.Role}" TextWrapping="Wrap" />
                     <TextBox Text="{x:Bind Model.DataDirectory}" Header="This session’s private data directory" IsReadOnly="True" TextWrapping="Wrap" />
                     <Button Click="OpenDataClicked"><TextBlock Text="Open local configuration folder" TextWrapping="Wrap" /></Button>
-                    <TextBlock Text="Endpoint fingerprints and task data stay on this device. Back up needed task outputs before uninstalling. To reconcile an unknown managed turn, quit the broker and use --reconcile-session only after independently confirming the prior turn has stopped."
+                    <TextBlock Text="Task data stays on this device. Back up needed outputs before uninstalling. To reconcile an unknown managed turn, quit the broker and use --reconcile-session only after independently confirming the prior turn has stopped."
                                Style="{StaticResource BodyText}" />
                 </StackPanel>
             </Expander>

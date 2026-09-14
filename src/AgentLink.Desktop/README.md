@@ -18,10 +18,12 @@ There are no external desktop packages.
   must invalidate it even if the original request source was already disposed.
   Supply a stable authenticated `OperationRequest.ActorId` (or
   `OperationContext.ActorId`) when sharing a handler between actors.
-- Every invocation requests `observe` or `desktop-control` consent. The host must
-  accurately maintain `IsConnected`, `ObservationAllowed`, and `DesktopAllowed`, cancel the bound link
-  on disconnect, block control during consent/pairing UI, and revoke on human
-  takeover. Input events recheck consent immediately before injection.
+- Every invocation checks `observe` or `desktop-control` through the host policy.
+  The broker authorizes these without a dialog while device access is enabled;
+  input still requires exclusive actor ownership. The host must accurately
+  maintain `IsConnected`, `ObservationAllowed`, and `DesktopAllowed`, cancel the
+  bound link on disconnect and revoke on device blocking/human takeover.
+  Input events recheck access immediately before injection.
 - Desktop calls across handler instances are serialized. Do not retry a mutation
   after an uncertain outcome without a fresh observation.
 - Human Stop/release calls `InvalidateObservations()` to cancel queued and active
@@ -71,7 +73,7 @@ disconnect and noninteractive execution fail explicitly. Window identities are
 checked against the process's Windows session and current desktop, including
 focus/capture/owner routing. Critical/system windows and Agent Link broker/control
 windows are protected. Captures intersecting visible Agent Link control UI fail
-instead of exposing its approval controls. Unknown identities fail closed.
+instead of exposing its local access/setup controls. Unknown identities fail closed.
 
 Only successfully synthesized key/button downs are owned and released, in reverse
 order, including cancellation and permission loss. Human-preheld modifiers are

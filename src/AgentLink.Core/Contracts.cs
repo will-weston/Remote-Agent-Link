@@ -44,6 +44,8 @@ public sealed record ConsentRequest(
 public interface IConsentService
 {
     bool IsConnected { get; }
+    bool DeviceAccessEnabled => true;
+    CancellationToken DeviceAccessLifetime => CancellationToken.None;
     bool DesktopAllowed { get; }
     bool ObservationAllowed => false;
     Task<bool> RequestAsync(ConsentRequest request, CancellationToken cancellationToken);

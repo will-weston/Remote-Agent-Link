@@ -19,7 +19,7 @@ internal sealed class BrokerSession(
         lock (_gate)
         {
             if (_stopping is not null)
-                throw new AgentLinkException("broker_stopping", "Desktop availability cannot be changed while the broker is stopping.");
+                throw new AgentLinkException("broker_stopping", "Device access cannot be changed while the broker is stopping.");
             Host.SetDesktopAccessEnabled(enabled);
         }
     }
@@ -36,18 +36,73 @@ internal sealed class DesktopAccessSettings
     internal const string FileName = "desktop-access.json";
     internal const int MaximumBytes = 512;
     private readonly string _path;
+    private readonly string _directory;
+    private readonly string? _legacyDirectory;
 
-    internal DesktopAccessSettings(string directory)
+    internal DesktopAccessSettings(string directory, string? legacyDirectory = null)
     {
         EndpointIdentity.EnsurePrivateDirectory(directory);
         _path = Path.Combine(directory, FileName);
+        _directory = directory;
+        _legacyDirectory = legacyDirectory;
     }
 
     internal bool Read()
     {
         try
         {
-            using var file = new FileStream(_path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+            using var settingsLock = AcquireLock();
+            var current = ReadFile(_path);
+            if (current is not null) return current.Value;
+            // The first new-version startup merges previous logon preferences.
+            // Any explicit No wins; malformed/unreadable legacy files fail closed.
+            var directories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (_legacyDirectory is not null) directories.Add(_legacyDirectory);
+            var sessions = Path.Combine(_directory, "sessions");
+            try
+            {
+                if ((File.GetAttributes(sessions) & FileAttributes.Directory) == 0)
+                    throw new IOException("The legacy sessions path is not a directory.");
+                foreach (var directory in Directory.EnumerateDirectories(sessions)) directories.Add(directory);
+            }
+            catch (FileNotFoundException) { }
+            catch (DirectoryNotFoundException) { }
+            var enabled = true;
+            foreach (var directory in directories)
+            {
+                var legacy = ReadFile(Path.Combine(directory, FileName));
+                if (legacy is null) continue;
+                enabled &= legacy.Value;
+            }
+            WriteFile(enabled);
+            return enabled;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            throw new AgentLinkException("desktop_access_settings_unavailable",
+                "Existing device preferences could not be migrated. Agent access remains off. Repair private device storage before restarting.");
+        }
+    }
+
+    internal bool ReadCurrent()
+    {
+        try
+        {
+            using var settingsLock = AcquireLock();
+            return ReadFile(_path) ?? throw InvalidSettings();
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            throw new AgentLinkException("desktop_access_settings_unavailable",
+                "The shared device preference is unavailable. Agent access remains off until the setting can be read.");
+        }
+    }
+
+    private static bool? ReadFile(string path)
+    {
+        try
+        {
+            using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
             if (file.Length is <= 0 or > MaximumBytes)
                 throw InvalidSettings();
             var bytes = new byte[checked((int)file.Length)];
@@ -61,45 +116,64 @@ internal sealed class DesktopAccessSettings
                 throw InvalidSettings();
             return enabled.GetBoolean();
         }
-        catch (FileNotFoundException) { return true; }
+        catch (FileNotFoundException) { return null; }
+        catch (DirectoryNotFoundException) { return null; }
         catch (JsonException) { throw InvalidSettings(); }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             throw new AgentLinkException("desktop_access_settings_unavailable",
-                "The saved desktop availability setting could not be read. Desktop access remains off. Check this session's private storage before restarting.");
+                "The saved device access setting could not be read. Agent access remains off. Check this user's private device storage before restarting.");
         }
     }
 
     internal void Save(bool enabled)
     {
-        var pending = _path + $".{Guid.NewGuid():N}.pending";
         try
         {
-            try
-            {
-                var bytes = JsonSerializer.SerializeToUtf8Bytes(new { version = 1, enabled }, Json.Options);
-                using (var file = new FileStream(pending, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
-                {
-                    file.Write(bytes);
-                    file.Flush(flushToDisk: true);
-                }
-                File.Move(pending, _path, overwrite: true);
-            }
-            finally
-            {
-                if (File.Exists(pending))
-                    File.Delete(pending);
-            }
+            using var settingsLock = AcquireLock();
+            WriteFile(enabled);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             throw new AgentLinkException("desktop_access_persistence_failed", enabled
-                ? "Desktop access was not changed because its setting could not be saved. Check this session's private storage and try again."
-                : "Desktop access is off now, but this choice could not be saved. Check this session's private storage and retry before restarting the broker.");
+                ? "Agent access was not changed because its setting could not be saved. Check private device storage and try again."
+                : "Agent access is off now, but this choice could not be saved. Check private device storage and retry before restarting the broker.");
+        }
+    }
+
+    private void WriteFile(bool enabled)
+    {
+        var pending = _path + $".{Guid.NewGuid():N}.pending";
+        try
+        {
+            var bytes = JsonSerializer.SerializeToUtf8Bytes(new { version = 1, enabled }, Json.Options);
+            using (var file = new FileStream(pending, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
+            {
+                file.Write(bytes);
+                file.Flush(flushToDisk: true);
+            }
+            File.Move(pending, _path, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(pending)) File.Delete(pending);
+        }
+    }
+
+    private FileStream AcquireLock()
+    {
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
+        while (true)
+        {
+            try { return new FileStream(_path + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None); }
+            catch (IOException exception) when ((exception.HResult & 0xffff) == 32 && elapsed.Elapsed < TimeSpan.FromSeconds(5))
+            {
+                Thread.Sleep(25);
+            }
         }
     }
 
     private static AgentLinkException InvalidSettings() =>
         new("desktop_access_settings_invalid",
-            "The saved desktop availability setting is malformed or unsupported. Desktop access remains off. Repair the session setting before restarting the broker.");
+            "The saved device access setting is malformed or unsupported. Agent access remains off. Repair the device setting before restarting the broker.");
 }

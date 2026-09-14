@@ -37,14 +37,10 @@ public sealed partial class MainWindow : Window
     private readonly DispatcherQueueTimer _refresh;
     private readonly nint _handle;
     private readonly TrayIcon _tray;
-    private PendingConsent? _active;
-    private ContentDialog? _approvalDialog;
-    private Task? _approvalLoop;
     private bool _started;
     private volatile bool _isClosed;
     private bool _quitInProgress;
     private volatile bool _safeToClose;
-    private bool _reviewInProgress;
     private PluginLoadingSettings? _pluginLoading;
     private bool _canManageLegacy;
     private bool _pluginLoadingBusy;
@@ -57,7 +53,6 @@ public sealed partial class MainWindow : Window
         _startup = startup;
         _settings = new SettingsViewModel
         {
-            Fingerprint = session.Identity.Fingerprint,
             DataDirectory = session.DataDirectory,
             Role = $"Endpoint role: {session.Role} · Windows session {Process.GetCurrentProcess().SessionId}"
         };
@@ -86,7 +81,6 @@ public sealed partial class MainWindow : Window
         _settingsView = _startup.Run(UiStartupPhase.SettingsViewConstruct, () => new SettingsView(_settings));
         _agentsView = _startup.Run(UiStartupPhase.AgentsViewConstruct, () => new AgentsView(_agentSetup));
         _startup.Checkpoint(UiStartupPhase.MainWindowBindActions);
-        _connectionsView.VerifyRequested += peer => RunUi(() => VerifyPeerAsync(peer));
         _connectionsView.CopyMcpRequested += CopyPeerMcpConfiguration;
         _connectionsView.SetupRequested += ShowSettings;
         _connectionsView.AgentsRequested += ShowAgents;
@@ -104,10 +98,6 @@ public sealed partial class MainWindow : Window
         _settingsView.StartupRequested += () => RunUi(OpenStartupAsync);
         _settingsView.StartupRefreshRequested += () => RunUi(RefreshStartupAsync);
         _settingsView.RuntimeRequested += () => RunUi(ConfigureRuntimeAsync);
-        _settingsView.PairRequested += fingerprint => RunUi(() => PairAsync(fingerprint, "Manually entered device"));
-        _settingsView.CopyFingerprintRequested += () => CopyText(_settings.Fingerprint, "Device fingerprint copied.");
-        _settingsView.RevokeRequested += fingerprint => RunUi(() => RevokeAsync(fingerprint));
-        _settingsView.RevokeAllRequested += () => RunUi(RevokeAllAsync);
         _settingsView.OpenDataRequested += () => RunUi(() =>
         {
             Process.Start(new ProcessStartInfo(_session.DataDirectory) { UseShellExecute = true });
@@ -139,8 +129,6 @@ public sealed partial class MainWindow : Window
         _session.Host.StatusChanged += StatusChanged;
         _session.Host.ShowRequested += ShowRequested;
         _session.Consent.Changed += ConsentChanged;
-        _session.Identity.UntrustedPeer += UntrustedPeer;
-        _session.Identity.TrustChanged += TrustChanged;
         _refresh = _startup.Run(UiStartupPhase.MainWindowRefreshTimer, DispatcherQueue.CreateTimer);
         _refresh.Interval = TimeSpan.FromSeconds(2);
         _refresh.Tick += RefreshTick;
@@ -153,13 +141,11 @@ public sealed partial class MainWindow : Window
         if (_started) return;
         _started = true;
         _startup.Checkpoint(UiStartupPhase.RootLoaded);
-        _approvalLoop = _startup.Run(UiStartupPhase.ApprovalConsumer, ConsumeApprovalsAsync);
         try
         {
             await _startup.RunAsync(UiStartupPhase.BrokerStart, () => Task.Run(_session.Host.Start));
-            WriteLog("Broker started. Automatic discovery does not grant desktop or agent permission.");
+            WriteLog("Broker started. Agent access follows this device's access setting and the signed-in Windows/RDP session.");
             _startup.Run(UiStartupPhase.InitialStatus, RefreshStatus);
-            _startup.Run(UiStartupPhase.InitialTrustedPeers, RefreshTrustedPeers);
             await _startup.RunAsync(UiStartupPhase.InitialStartupSetting, RefreshStartupAsync);
             InitializePluginLoading();
             _startup.Run(UiStartupPhase.RefreshTimerStart, _refresh.Start);
@@ -181,7 +167,6 @@ public sealed partial class MainWindow : Window
         if (ReferenceEquals(args.SelectedItem, SettingsNavigation))
         {
             PageContent.Content = _settingsView;
-            RefreshTrustedPeers();
             RunUi(RefreshStartupAsync);
             RefreshPluginLoading();
         }
@@ -234,7 +219,6 @@ public sealed partial class MainWindow : Window
         _lifetime.SessionEnding = ending;
         if (ending)
         {
-            _active?.Answer.TrySetResult(false);
             _session.Host.OnSessionUnavailable();
         }
     }
@@ -280,7 +264,6 @@ public sealed partial class MainWindow : Window
             Root.ActualTheme == ElementTheme.Dark ? TitleBarTheme.Dark : TitleBarTheme.Light;
     }
 
-    private void ReviewClicked(object sender, RoutedEventArgs args) => RunUi(ReviewApprovalAsync);
     private void NoticeClosed(InfoBar sender, InfoBarClosedEventArgs args) => Model.Notice = "";
     private Task SetDesktopAccessAsync(bool enabled, bool showNotice = false)
     {
@@ -308,18 +291,17 @@ public sealed partial class MainWindow : Window
             try { activeCount = _session.Host.ListLocalTasks(true).Count; }
             catch (Exception exception) when (exception is AgentLinkException or SqliteException or IOException)
             { activeCount = null; }
-            if (activeCount is not 0 || _session.Consent.HasDesktopLease || _active is not null)
+            if (activeCount is not 0 || _session.Consent.HasDesktopLease)
             {
                 if (!await ConfirmAsync("Quit and stop the broker?",
                     (activeCount is null ? "Active task state could not be read. " : $"{activeCount} active tasks on this device. ") +
                     "Quitting interrupts owned work and ends desktop access. " +
-                    "Already performed side effects are not rolled back.\n\nTo leave approved work running, close the window instead.", "Quit and stop"))
+                    "Already performed side effects are not rolled back.\n\nTo leave work running, close the window instead.", "Quit and stop"))
                     return;
             }
             _lifetime.Quitting = true;
             Model.IsBusy = true;
             Model.Notice = "Stopping the broker and its owned work. Please wait…";
-            _active?.Answer.TrySetResult(false);
             _session.Host.StopDesktopControl();
             await _session.StopAsync();
             _safeToClose = true;
@@ -331,97 +313,22 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private async void OnClosed(object sender, WindowEventArgs args)
+    private void OnClosed(object sender, WindowEventArgs args)
     {
         if (_isClosed) return;
         _isClosed = true;
         _refresh.Stop();
         _refresh.Tick -= RefreshTick;
         _closed.Cancel();
-        _active?.Answer.TrySetResult(false);
         _session.Host.Log -= WriteLog;
         _session.Host.StatusChanged -= StatusChanged;
         _session.Host.ShowRequested -= ShowRequested;
         _session.Consent.Changed -= ConsentChanged;
-        _session.Identity.UntrustedPeer -= UntrustedPeer;
-        _session.Identity.TrustChanged -= TrustChanged;
         _activity.RefreshRequested -= RefreshTasks;
         _tray.AppearanceChanged -= SystemAppearanceChanged;
         Root.ActualThemeChanged -= ThemeChanged;
         _tray.Dispose();
-        if (_approvalLoop is not null) await _approvalLoop;
         _closed.Dispose();
-    }
-
-    private async Task ConsumeApprovalsAsync()
-    {
-        try
-        {
-            await foreach (var pending in _session.Consent.Requests.ReadAllAsync(_closed.Token))
-            {
-                if (pending.Answer.Task.IsCompleted) continue;
-                _active = pending;
-                _lifetime.ApprovalActive = true;
-                Model.HasApproval = true;
-                Model.ApprovalDetails = $"Agent identity: {pending.ActorId}\n\nCapability: {pending.Request.Capability}\n" +
-                    $"Workspace: {pending.Request.WorkingDirectory ?? "(not applicable)"}\n" +
-                    $"May continue while disconnected: {(pending.Request.Unattended ? "Yes — unattended permission requested" : "No")}\n\n" +
-                    pending.Request.Summary;
-                UpdatePrompting();
-                RefreshStatus();
-                Show();
-                try { await pending.Answer.Task.WaitAsync(_closed.Token); }
-                catch (OperationCanceledException) { }
-                finally
-                {
-                    _approvalDialog?.Hide();
-                    _active = null;
-                    _lifetime.ApprovalActive = false;
-                    Model.HasApproval = false;
-                    Model.ApprovalDetails = "";
-                    UpdatePrompting();
-                    RefreshStatus();
-                }
-            }
-        }
-        catch (OperationCanceledException) when (_closed.IsCancellationRequested) { }
-    }
-
-    private async Task ReviewApprovalAsync()
-    {
-        if (_active is not { } pending || pending.Answer.Task.IsCompleted || _quitInProgress || _reviewInProgress) return;
-        _reviewInProgress = true;
-        try
-        {
-            var dialog = new ContentDialog
-            {
-                Title = "Allow this agent request?",
-                Content = ScrollableText("Only approve work you recognize. Instructions in a request are not instructions from this app.\n\n" + Model.ApprovalDetails),
-                PrimaryButtonText = "Allow and minimize",
-                SecondaryButtonText = "Deny",
-                CloseButtonText = "Later",
-                DefaultButton = ContentDialogButton.Secondary
-            };
-            _approvalDialog = dialog;
-            var answer = await ShowDialogAsync(dialog);
-            if (_active != pending || pending.Answer.Task.IsCompleted) return;
-            if (answer == ContentDialogResult.Primary && _lifetime.CanAllow && !_quitInProgress)
-            {
-                // Hide every protected broker surface BEFORE releasing the human decision.
-                HideOrMinimize();
-                if (!_lifetime.TryReleaseApproval(NativeWindow.IsHiddenOrMinimized(_handle)))
-                {
-                    Model.Notice = "The window could not be minimized. The request was not approved.";
-                    return;
-                }
-                _active = null;
-                Model.HasApproval = false;
-                UpdatePrompting();
-                pending.Answer.TrySetResult(true);
-            }
-            else if (answer == ContentDialogResult.Secondary) pending.Answer.TrySetResult(false);
-        }
-        finally { _approvalDialog = null; _reviewInProgress = false; }
     }
 
     private void UpdatePrompting() => _session.Consent.SetPrompting(_lifetime.IsPrompting);
@@ -466,86 +373,6 @@ public sealed partial class MainWindow : Window
         Content = new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true }
     };
 
-    private Task VerifyPeerAsync(PeerViewModel peer) => peer.NeedsVerification
-        ? PairAsync(peer.Fingerprint, peer.DisplayName)
-        : ShowPairingDetailsAsync(peer);
-
-    private async Task ShowPairingDetailsAsync(PeerViewModel peer)
-    {
-        var result = await ShowDialogAsync(new ContentDialog
-        {
-            Title = peer.DisplayName,
-            Content = ScrollableText($"Device name is not proof of identity.\n\nCertificate SHA-256:\n{peer.Fingerprint}\n\n" +
-                $"{peer.Pairing}\n\n{peer.McpDetails}\n\n{peer.Detail}\n\nTrust can be revoked in Settings."),
-            CloseButtonText = "Done", PrimaryButtonText = "Copy details"
-        });
-        if (result == ContentDialogResult.Primary) CopyText($"{peer.Fingerprint}\n\n{peer.McpDetails}", "Pairing details copied.");
-    }
-
-    private async Task PairAsync(string fingerprint, string displayName)
-    {
-        var normalized = fingerprint.Replace(":", "", StringComparison.Ordinal).Replace(" ", "", StringComparison.Ordinal).Trim().ToUpperInvariant();
-        if (normalized.Length != 64 || normalized.Any(character => !Uri.IsHexDigit(character)))
-            throw new ArgumentException("Enter the full 64 hexadecimal characters of the certificate SHA-256 fingerprint.");
-        var check = new CheckBox
-        {
-            Content = new TextBlock
-            {
-                Text = "I compared all 64 characters with the other device over a trusted connection.",
-                TextWrapping = TextWrapping.Wrap
-            }
-        };
-        var content = new StackPanel { Spacing = 16 };
-        content.Children.Add(new TextBlock { Text = $"{displayName}\nA device name is only a label, not identity proof.", TextWrapping = TextWrapping.Wrap });
-        content.Children.Add(new TextBox { Header = "Other device’s certificate SHA-256", Text = normalized, IsReadOnly = true, TextWrapping = TextWrapping.Wrap });
-        content.Children.Add(new TextBlock { Text = "Compare this complete fingerprint with the other endpoint’s Settings. Pairing does not authorize desktop access or agent work.", TextWrapping = TextWrapping.Wrap });
-        content.Children.Add(check);
-        var dialog = new ContentDialog
-        {
-            Title = "Verify device identity",
-            Content = new ScrollViewer { Content = content, MaxHeight = 440, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled },
-            PrimaryButtonText = "Pair device", CloseButtonText = "Cancel", DefaultButton = ContentDialogButton.Close,
-            IsPrimaryButtonEnabled = false
-        };
-        check.Checked += (_, _) => dialog.IsPrimaryButtonEnabled = true;
-        check.Unchecked += (_, _) => dialog.IsPrimaryButtonEnabled = false;
-        if (await ShowDialogAsync(dialog) != ContentDialogResult.Primary || check.IsChecked != true) return;
-        _session.Identity.Trust(normalized);
-        Model.Notice = "Identity saved. Verify this device on the other endpoint too. Pairing does not grant desktop or agent permissions.";
-        RefreshTrustedPeers();
-        RefreshStatus();
-    }
-
-    private async Task RevokeAsync(string? fingerprint)
-    {
-        if (fingerprint is null) { Model.Notice = "Select a trusted fingerprint first."; return; }
-        if (await ConfirmAsync("Revoke this device?", $"Disconnect this identity and remove its pairing?\n\n{fingerprint}\n\nThis does not undo prior task side effects.", "Revoke device"))
-        {
-            _session.Identity.Revoke(fingerprint);
-            Model.Notice = "Device trust revoked. Separately approved task outcomes remain in Activity.";
-            RefreshTrustedPeers();
-        }
-    }
-
-    private async Task RevokeAllAsync()
-    {
-        if (_settings.TrustedFingerprints.Count == 0) { Model.Notice = "There are no paired devices to revoke."; return; }
-        if (await ConfirmAsync("Revoke all paired devices?", "Disconnect and remove every trusted device identity? You will need to verify fingerprints again. This does not undo prior task side effects.", "Revoke all"))
-        {
-            _session.Identity.RevokeAll();
-            RefreshTrustedPeers();
-            Model.Notice = "All paired device trust revoked.";
-        }
-    }
-
-    private void RefreshTrustedPeers()
-    {
-        var fingerprints = _session.Identity.TrustedFingerprints.Order(StringComparer.Ordinal).ToArray();
-        if (_settings.TrustedFingerprints.SequenceEqual(fingerprints)) return;
-        _settings.TrustedFingerprints.Clear();
-        foreach (var fingerprint in fingerprints) _settings.TrustedFingerprints.Add(fingerprint);
-    }
-
     private void RefreshTasks()
     {
         if (_isClosed || !_started) return;
@@ -556,7 +383,7 @@ public sealed partial class MainWindow : Window
 
     private void ShowTaskDetails()
     {
-        if (_activity.Selected is not { } selected) { _activity.Details = "Select a task to see its prompt, permission grant and result."; return; }
+        if (_activity.Selected is not { } selected) { _activity.Details = "Select a task to see its prompt, scope and result."; return; }
         try { _activity.ShowDetails(_session.Host.GetLocalTask(selected.TaskId)); }
         catch (Exception exception) when (exception is AgentLinkException or SqliteException or IOException)
         { _activity.Details = $"Task details unavailable: {exception.Message}"; }
@@ -597,7 +424,7 @@ public sealed partial class MainWindow : Window
             "This selection does not start it, sign in or authorize work.", "Save runtime"))
             return;
         LocalSetup.ConfigureManagedRuntime(_session.DataDirectory, file.Path);
-        _settings.RuntimeStatus = $"Saved: {file.Path}\nIts exact version is checked when a human-approved session starts.";
+        _settings.RuntimeStatus = $"Saved: {file.Path}\nIts exact version is checked when a managed session starts.";
     }
 
     private void InitializePluginLoading()
@@ -736,16 +563,14 @@ public sealed partial class MainWindow : Window
                 McpRegistration.Saved => ("Saved in Copilot configuration", "Start a new Copilot CLI session to load the server. A running broker alone does not attach it to an agent."),
                 McpRegistration.Custom => ("A custom entry already exists", "Your existing target and settings were left unchanged. Review remote-agent-link using /mcp in that Copilot profile."),
                 McpRegistration.Invalid => ("Configuration needs attention", "The configuration could not be interpreted safely. Open Copilot's /mcp settings; this app will not replace it."),
-                _ => ("Not added to Copilot yet", "Add the installed MCP command to this Copilot profile. This does not grant any desktop or agent permission.")
+                _ => ("Not added to Copilot yet", "Add the installed MCP command to this Copilot profile. The target device's access setting controls available actions.")
             };
-            Model.McpSetupStatus = _agentSetup.Status;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             _agentSetup.CanRegister = false;
             _agentSetup.Status = "Setup status unavailable";
             _agentSetup.Detail = "Copilot configuration could not be read. Check the displayed profile path and use /mcp in your agent.";
-            Model.McpSetupStatus = _agentSetup.Status;
         }
     }
 
@@ -757,7 +582,7 @@ public sealed partial class MainWindow : Window
         try
         {
             await McpSetup.RegisterAsync(_closed.Token);
-            Model.Notice = "MCP setup saved. Start a new Copilot CLI session, then run /mcp show remote-agent-link. No desktop permissions were granted.";
+            Model.Notice = "MCP setup saved, not connected yet. Start a new Copilot CLI session, then run /mcp show remote-agent-link.";
         }
         finally { _agentSetup.Busy = false; RefreshMcpSetup(); }
     }
@@ -777,7 +602,7 @@ public sealed partial class MainWindow : Window
         }
         var target = currentPeer.IsIncoming ? McpTarget.CurrentSession : McpTarget.FixedConnection;
         CopyText(McpConfiguration.Create(target, currentPeer.McpConnectionId), currentPeer.IsIncoming
-            ? "MCP configuration copied for this Windows session. It still requires the same human permissions."
+            ? "MCP configuration copied for this Windows session. Agent access follows this device's Yes/No setting."
             : $"MCP configuration copied for {currentPeer.DisplayName}. This target is fixed and will never be replaced by another device.");
     }
 
@@ -804,21 +629,16 @@ public sealed partial class MainWindow : Window
     {
         if (_isClosed) return;
         Model.Update(_session.Host.PeerConnections, _session.Host.IsRunning, _session.Host.LastTransportError,
-            _session.Consent.HasDesktopLease, _session.Host.Connections, _session.Consent.DesktopAccessEnabled);
-        _tray.Update($"Remote Agent Link · {(Model.HasApproval ? "Approval needed" : !Model.DesktopAccessEnabled ? "Agent desktop access blocked on this PC" : Model.Headline)}");
+            _session.Consent.HasDesktopLease, _session.Host.Connections, _session.Consent.DesktopAccessEnabled,
+            _session.Host.GetAgentConnections());
+        _tray.Update($"Remote Agent Link · {(!Model.DesktopAccessEnabled ? "Agent access blocked" : Model.AgentCount)}");
         _lifetime.TrayAvailable = _tray.Available;
     }
     private void StatusChanged() => Post(RefreshStatus);
     private void ShowRequested() => WindowActivation.Request(
         !_isClosed && !_safeToClose && !_lifetime.Quitting && !_lifetime.SessionEnding,
         () => DispatcherQueue.TryEnqueue(() => Show()));
-    private void ConsentChanged() => Post(() =>
-    {
-        if (!_session.Consent.IsConnected) _active?.Answer.TrySetResult(false);
-        RefreshStatus();
-    });
-    private void TrustChanged() => Post(() => { RefreshTrustedPeers(); RefreshStatus(); });
-    private void UntrustedPeer(string fingerprint) => WriteLog($"Unverified channel identity: {fingerprint}. Compare the complete fingerprint before pairing.");
+    private void ConsentChanged() => Post(RefreshStatus);
     private void WriteLog(string message) => Post(() =>
     {
         var existing = Model.ActivityLog;

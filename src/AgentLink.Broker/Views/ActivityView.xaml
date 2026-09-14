@@ -22,7 +22,7 @@
                 <StackPanel Spacing="16" Padding="8,24" HorizontalAlignment="Center" MaxWidth="420">
                     <FontIcon Glyph="&#xE9D9;" FontSize="40" />
                     <TextBlock Text="No tasks to show" Style="{StaticResource SubtitleTextBlockStyle}" TextAlignment="Center" TextWrapping="Wrap" />
-                    <TextBlock Text="Approved agent tasks and saved results appear here. Check the active-only filter if you expected completed work." Style="{StaticResource BodyText}" TextAlignment="Center" />
+                    <TextBlock Text="Agent tasks and saved results appear here. Check the active-only filter if you expected completed work." Style="{StaticResource BodyText}" TextAlignment="Center" />
                 </StackPanel>
             </Border>
             <ListView ItemsSource="{x:Bind Model.Tasks}" SelectedItem="{x:Bind Model.Selected, Mode=TwoWay}" SelectionChanged="SelectionChanged"

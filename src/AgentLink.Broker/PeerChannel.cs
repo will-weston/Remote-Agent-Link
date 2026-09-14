@@ -11,7 +11,6 @@ internal sealed class PeerChannel : IDisposable
     private PeerConnectionSnapshot _snapshot;
     private EndpointHello? _hello;
     private bool _legacy;
-    private bool _trustChanged;
     private bool _closed;
     private int _disposed;
     private RpcPeer? _peer;
@@ -26,14 +25,15 @@ internal sealed class PeerChannel : IDisposable
         _snapshot = new(Guid.NewGuid().ToString("N"),
             direction == PeerDirection.RemoteDesktop ? "Remote desktop" : "Incoming agent",
             "", 0, direction, PeerConnectionStatus.Connecting, false, false, DateTimeOffset.UtcNow,
-            "Establishing an encrypted channel; no permissions have been granted.");
+            "Establishing an encrypted channel over authenticated RDP.");
     }
 
     internal string Id => _snapshot.Id;
     internal CancellationToken Lifetime => _token;
+    internal string? LogonId { get { lock (_gate) return _hello?.LogonId; } }
     internal PeerConnectionSnapshot Snapshot { get { lock (_gate) return _snapshot; } }
     internal bool Ready { get { lock (_gate) return ReadyLocked; } }
-    private bool ReadyLocked => !_closed && !_trustChanged && !_token.IsCancellationRequested && DateTime.UtcNow >= _validFrom && DateTime.UtcNow < _validUntil &&
+    private bool ReadyLocked => !_closed && !_token.IsCancellationRequested && DateTime.UtcNow >= _validFrom && DateTime.UtcNow < _validUntil &&
         _snapshot.TrustedLocally && _snapshot.TrustedRemotely && (_hello is not null || _legacy);
     internal bool Closed { get { lock (_gate) return _closed; } }
     internal RpcPeer? Peer { get { lock (_gate) return _peer; } }
@@ -44,6 +44,8 @@ internal sealed class PeerChannel : IDisposable
         lock (_gate)
         {
             ThrowIfClosed();
+            if (_certificate is not null)
+                throw new AgentLinkException("identity_changed", "A channel cannot replace its authenticated certificate.");
             _certificate = X509CertificateLoader.LoadCertificate(certificate.GetRawCertData());
             _validFrom = _certificate.NotBefore.ToUniversalTime();
             _validUntil = _certificate.NotAfter.ToUniversalTime();
@@ -66,12 +68,9 @@ internal sealed class PeerChannel : IDisposable
         lock (_gate)
         {
             ThrowIfClosed();
-            if (_snapshot.TrustedLocally == trusted && !_trustChanged)
+            if (_snapshot.TrustedLocally == trusted)
                 return;
-            _snapshot = _snapshot with { TrustedLocally = trusted };
-            _trustChanged = true;
-            UpdateStatus();
-            throw new AgentLinkException("pairing_required", "Local pairing changed during the channel handshake. Reconnect before using operations.");
+            throw new AgentLinkException("identity_changed", "Channel authentication changed during the handshake.");
         }
     }
 
@@ -81,15 +80,13 @@ internal sealed class PeerChannel : IDisposable
         {
             ThrowIfClosed();
             var legacy = hello?.SupportsPendingPairing != true;
-            if (legacy && !_snapshot.TrustedLocally)
-                throw new AgentLinkException("pairing_required", "Legacy endpoints must already be paired locally. Update both endpoints for pending pairing.");
             if ((_hello is not null || _legacy) && (_hello != hello || _legacy != legacy))
                 throw new AgentLinkException("identity_changed", "Peer metadata changed during this channel. Reconnect before continuing.");
             _hello = hello;
             _legacy = legacy;
             _snapshot = _snapshot with
             {
-                DisplayName = hello?.DisplayName ?? (_snapshot.Direction == PeerDirection.RemoteDesktop ? "Paired remote desktop" : "Paired incoming agent"),
+                DisplayName = hello?.DisplayName ?? (_snapshot.Direction == PeerDirection.RemoteDesktop ? "Remote desktop" : "Incoming computer"),
                 SessionId = hello?.SessionId ?? 0,
                 TrustedRemotely = legacy || hello!.TrustedPeer == true
             };
@@ -101,7 +98,16 @@ internal sealed class PeerChannel : IDisposable
     {
         lock (_gate)
             if (!ReadyLocked)
-                throw new AgentLinkException("pairing_required", "Pair both endpoints and wait for the channel to be ready before using operations.");
+                throw new AgentLinkException("channel_not_ready", "The authenticated channel is not ready. Update both endpoints and reconnect.");
+    }
+
+    internal void WithReady(Action action)
+    {
+        lock (_gate)
+        {
+            RequireReady();
+            action();
+        }
     }
 
     internal bool Close()
@@ -126,12 +132,10 @@ internal sealed class PeerChannel : IDisposable
     {
         _snapshot = _snapshot with
         {
-            Status = ReadyLocked ? PeerConnectionStatus.Connected : PeerConnectionStatus.AwaitingApproval,
+            Status = ReadyLocked ? PeerConnectionStatus.Connected : PeerConnectionStatus.Connecting,
             Detail = ReadyLocked
-                ? _legacy ? "Paired legacy channel; remote pairing is inferred from strict TLS and the peer session may be unknown. Tool permissions still require human approval."
-                    : "Paired channel. Desktop, agent delegation and unattended work still require human approval."
-                : !_snapshot.TrustedLocally ? "Compare the fingerprint on both devices, then pair this endpoint locally."
-                    : "Waiting for the other device to pair this endpoint. No tool permissions have been granted."
+                ? "Authenticated RDP channel. Each device controls its own agent access."
+                : "Waiting for authenticated endpoint metadata. Update both endpoints if this persists."
         };
     }
 

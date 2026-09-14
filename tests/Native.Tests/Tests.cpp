@@ -19,9 +19,12 @@ using Microsoft::WRL::ComPtr;
 using ral::PduReassembler;
 
 unsigned ActivationTests();
+unsigned CrossProcessActivationTests();
+int CrossProcessActivationServer(char** arguments);
 
 namespace {
 unsigned checks{};
+HRESULT NoClientReporter(std::wstring&) noexcept { return S_FALSE; }
 void Check(bool value, const char* message) {
     ++checks;
     if (!value) throw std::runtime_error(message);
@@ -138,10 +141,12 @@ public:
 class FakeManager final : public ral::ComObject<IWTSVirtualChannelManager> {
 public:
     ComPtr<IWTSListenerCallback> callback;
+    bool failListener{};
     HRESULT STDMETHODCALLTYPE CreateListener(const unsigned char* name, ULONG flags,
         IWTSListenerCallback* handler, IWTSListener** listener) noexcept override {
         if (!listener || !handler || !name || std::strcmp(reinterpret_cast<const char*>(name), "RALink.v1") || flags)
             return E_INVALIDARG;
+        if (failListener) { *listener = nullptr; return E_FAIL; }
         callback = handler;
         *listener = new (std::nothrow) FakeListener;
         return *listener ? S_OK : E_OUTOFMEMORY;
@@ -172,6 +177,130 @@ public:
     }
 };
 
+std::wstring clientTestPipe;
+HRESULT ClientTestPipe(std::wstring& name) noexcept {
+    try { name = clientTestPipe; return S_OK; }
+    catch (...) { return E_OUTOFMEMORY; }
+}
+
+ral::WinHandle ClientTestServer() {
+    ral::WinHandle pipe(CreateNamedPipeW(clientTestPipe.c_str(), PIPE_ACCESS_DUPLEX |
+        FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+        1, 4096, 4096, 0, nullptr));
+    Check(static_cast<bool>(pipe), "create only a random test-owned lifecycle pipe");
+    return pipe;
+}
+
+void WaitClientReporter(HANDLE pipe) {
+    ral::WinHandle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+    OVERLAPPED operation{};
+    operation.hEvent = event.get();
+    if (ConnectNamedPipe(pipe, &operation) || GetLastError() == ERROR_PIPE_CONNECTED) return;
+    Check(GetLastError() == ERROR_IO_PENDING, "pending lifecycle connect");
+    const auto wait = WaitForSingleObject(event.get(), 8000);
+    DWORD transferred{};
+    if (wait != WAIT_OBJECT_0) {
+        CancelIoEx(pipe, &operation);
+        GetOverlappedResult(pipe, &operation, &transferred, TRUE);
+    }
+    Check(wait == WAIT_OBJECT_0 && GetOverlappedResult(pipe, &operation, &transferred, FALSE),
+        "local lifecycle connects independently of DVC");
+}
+
+std::array<BYTE, 48> ReadClientReport(HANDLE pipe, DWORD state) {
+    const auto deadline = GetTickCount64() + 8000;
+    while (GetTickCount64() < deadline) {
+        std::array<BYTE, 48> bytes{};
+        DWORD offset{};
+        while (offset < bytes.size()) {
+            ral::WinHandle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+            OVERLAPPED operation{};
+            operation.hEvent = event.get();
+            DWORD read{};
+            if (!ReadFile(pipe, bytes.data() + offset, static_cast<DWORD>(bytes.size()) - offset, &read, &operation)) {
+                Check(GetLastError() == ERROR_IO_PENDING, "read lifecycle record");
+                const auto wait = WaitForSingleObject(event.get(), 8000);
+                if (wait != WAIT_OBJECT_0) {
+                    CancelIoEx(pipe, &operation);
+                    GetOverlappedResult(pipe, &operation, &read, TRUE);
+                }
+                Check(wait == WAIT_OBJECT_0 && GetOverlappedResult(pipe, &operation, &read, FALSE),
+                    "bounded lifecycle record read");
+            }
+            Check(read != 0, "lifecycle record is not truncated");
+            offset += read;
+        }
+        Check(std::memcmp(bytes.data(), "RALCLT1", 8) == 0, "lifecycle protocol signature");
+        DWORD actual{}, reserved{};
+        std::memcpy(&actual, bytes.data() + 40, sizeof(actual));
+        std::memcpy(&reserved, bytes.data() + 44, sizeof(reserved));
+        Check(reserved == 0 && actual <= 2, "bounded lifecycle state and reserved bytes");
+        GUID instance{}, epoch{};
+        std::memcpy(&instance, bytes.data() + 8, sizeof(instance));
+        std::memcpy(&epoch, bytes.data() + 24, sizeof(epoch));
+        Check(instance != GUID_NULL && epoch != GUID_NULL, "lifecycle identities are nonzero");
+        if (actual == state) return bytes;
+    }
+    throw std::runtime_error("lifecycle state transition was not reported");
+}
+
+void ClientLifecycleTests() {
+    GUID unique{};
+    Check(SUCCEEDED(CoCreateGuid(&unique)), "random lifecycle fixture identity");
+    std::array<wchar_t, 40> text{};
+    Check(StringFromGUID2(unique, text.data(), static_cast<int>(text.size())) != 0, "format fixture identity");
+    clientTestPipe = L"\\\\.\\pipe\\RemoteAgentLink.Test.ClientLifecycle." + std::wstring(text.data());
+    ComPtr<IWTSPluginFactory> factory;
+    Check(SUCCEEDED(ral::CreatePluginFactory(ral::PluginLoadingMode::Modern, &factory, ClientTestPipe)),
+        "inject isolated lifecycle pipe without changing production transport");
+    ComPtr<IWTSPlugin> plugin;
+    Check(SUCCEEDED(factory->CreatePlugin(0, &plugin)), "create lifecycle plugin");
+    ComPtr<FakeManager> manager;
+    manager.Attach(new FakeManager);
+    Check(SUCCEEDED(plugin->Initialize(manager.Get())), "initialize without a broker or DVC channel");
+    auto pipe = ClientTestServer();
+    WaitClientReporter(pipe.get());
+    const auto initialized = ReadClientReport(pipe.get(), 0);
+    Check(SUCCEEDED(plugin->Connected()), "lifecycle connected callback");
+    const auto connected = ReadClientReport(pipe.get(), 1);
+    Check(std::memcmp(initialized.data() + 8, connected.data() + 8, 16) == 0,
+        "connect retains plugin instance identity");
+    Check(SUCCEEDED(plugin->Disconnected(0)), "lifecycle disconnect callback");
+    const auto disconnected = ReadClientReport(pipe.get(), 2);
+    Check(std::memcmp(connected.data() + 8, disconnected.data() + 8, 32) == 0,
+        "disconnect retains identity and last epoch");
+    Check(SUCCEEDED(plugin->Connected()), "lifecycle reconnect callback");
+    const auto reconnected = ReadClientReport(pipe.get(), 1);
+    Check(std::memcmp(connected.data() + 8, reconnected.data() + 8, 16) == 0 &&
+        std::memcmp(connected.data() + 24, reconnected.data() + 24, 16) != 0,
+        "reconnect retains instance and invalidates epoch");
+    pipe.reset();
+    pipe = ClientTestServer();
+    WaitClientReporter(pipe.get());
+    const auto restarted = ReadClientReport(pipe.get(), 1);
+    Check(restarted == reconnected, "broker restart republishes the same target without DVC");
+    Check(SUCCEEDED(plugin->Terminated()), "terminate lifecycle worker without joining in callback");
+    plugin.Reset();
+    manager.Reset();
+    pipe.reset();
+    pipe = ClientTestServer();
+    Check(SUCCEEDED(factory->CreatePlugin(0, &plugin)), "create independent lifecycle-only plugin");
+    manager.Attach(new FakeManager);
+    manager->failListener = true;
+    Check(SUCCEEDED(plugin->Initialize(manager.Get())) && !manager->callback,
+        "listener failure does not unload independent client discovery");
+    Check(SUCCEEDED(plugin->Connected()), "report an RDP connection even when listener creation failed");
+    WaitClientReporter(pipe.get());
+    const auto withoutListener = ReadClientReport(pipe.get(), 1);
+    Check(std::memcmp(withoutListener.data() + 8, connected.data() + 8, 16) != 0,
+        "independent plugin instances never share identity");
+    Check(SUCCEEDED(plugin->Terminated()), "stop lifecycle-only plugin");
+    plugin.Reset();
+    manager.Reset();
+    factory.Reset();
+}
+
 void AbiTests() {
     uint32_t error = 99, count = 99;
     Check(!RAL_Open(nullptr, &error) && error == ERROR_INVALID_PARAMETER, "open null name");
@@ -197,9 +326,19 @@ void ProxyTests() {
     Check(library.value != nullptr, "load generated proxy DLL without registration");
     Check(GetProcAddress(library.value, "GetProxyDllInfo") != nullptr, "proxy metadata export");
     const CLSID expected{0x586b220f, 0x6970, 0x4e64, {0xb5, 0xdd, 0x43, 0x8a, 0x29, 0x8a, 0x87, 0x6a}};
-    const std::array<IID, 7> interfaces{__uuidof(IWTSPluginFactory), __uuidof(IWTSPlugin),
+    const std::array<IID, 10> interfaces{__uuidof(IWTSPluginFactory), __uuidof(IWTSPlugin),
         __uuidof(IWTSListener), __uuidof(IWTSListenerCallback), __uuidof(IWTSVirtualChannelCallback),
-        __uuidof(IWTSVirtualChannelManager), __uuidof(IWTSVirtualChannel)};
+        __uuidof(IWTSVirtualChannelManager), __uuidof(IWTSVirtualChannel),
+        __uuidof(IWTSPluginServiceProvider), __uuidof(IWTSWindowInfoService), __uuidof(IWTSWindowChangedCallback)};
+    const std::array publicSurfaceIids{
+        L"{D3E07363-087C-476C-86A7-DBB15F46DDB4}",
+        L"{2A002C7B-0120-4D04-BFB1-3C73110C8581}",
+        L"{E8A47FD3-1AF6-4D7F-8E15-515CCAE1C00C}"};
+    for (size_t i = 0; i < publicSurfaceIids.size(); ++i) {
+        IID expectedIid{};
+        Check(SUCCEEDED(IIDFromString(publicSurfaceIids[i], &expectedIid)) && expectedIid == interfaces[i + 7],
+            "surface interface IID exactly matches the licensed public contract");
+    }
     using GetFactory = HRESULT (STDAPICALLTYPE*)(REFCLSID, REFIID, void**);
     GetFactory getFactory{};
     auto address = GetProcAddress(library.value, "DllGetClassObject");
@@ -218,7 +357,7 @@ void ProxyTests() {
 
 void PluginTests() {
     ComPtr<IWTSPluginFactory> factory;
-    Check(SUCCEEDED(ral::CreatePluginFactory(ral::PluginLoadingMode::Modern, &factory)), "create factory");
+    Check(SUCCEEDED(ral::CreatePluginFactory(ral::PluginLoadingMode::Modern, &factory, NoClientReporter)), "create factory");
     long count{};
     Check(factory->GetPluginCount(nullptr) == E_POINTER, "factory count pointer");
     Check(SUCCEEDED(factory->GetPluginCount(&count)) && count == 1, "factory count ABI");
@@ -313,7 +452,7 @@ void FailureTests() {
     ComPtr<IWTSPlugin> plugin;
     ComPtr<FakeManager> manager;
     manager.Attach(new FakeManager);
-    Check(SUCCEEDED(ral::CreatePluginFactory(ral::PluginLoadingMode::Modern, &factory)) &&
+    Check(SUCCEEDED(ral::CreatePluginFactory(ral::PluginLoadingMode::Modern, &factory, NoClientReporter)) &&
         SUCCEEDED(factory->CreatePlugin(0, &plugin)) &&
         SUCCEEDED(plugin->Initialize(manager.Get())), "failure fixture");
     const auto open = [&] {
@@ -395,6 +534,22 @@ void PackageManifestTests() {
     Microsoft::WRL::ComPtr<IStream> stream;
     Check(SUCCEEDED(SHCreateStreamOnFileEx(L"packaging\\AgentLink.Msix\\Package.appxmanifest",
         STGM_READ | STGM_SHARE_DENY_WRITE, 0, FALSE, nullptr, &stream)), "package manifest stream");
+    STATSTG stat{};
+    Check(SUCCEEDED(stream->Stat(&stat, STATFLAG_NONAME)) && stat.cbSize.QuadPart < 65536, "bounded manifest source");
+    std::string xml(static_cast<size_t>(stat.cbSize.QuadPart), '\0');
+    ULONG bytes{};
+    Check(SUCCEEDED(stream->Read(xml.data(), static_cast<ULONG>(xml.size()), &bytes)) && bytes == xml.size(),
+        "read manifest interface registrations");
+    for (const auto iid : {"D3E07363-087C-476C-86A7-DBB15F46DDB4", "2A002C7B-0120-4D04-BFB1-3C73110C8581",
+        "E8A47FD3-1AF6-4D7F-8E15-515CCAE1C00C"}) {
+        const auto registration = std::string("<com:Interface Id=\"") + iid +
+            "\" ProxyStubClsid=\"586B220F-6970-4E64-B5DD-438A298A876A\"";
+        const auto found = xml.find(registration);
+        Check(found != std::string::npos && xml.find(registration, found + 1) == std::string::npos,
+            "each public surface interface has exactly one owned packaged proxy mapping");
+    }
+    LARGE_INTEGER beginning{};
+    Check(SUCCEEDED(stream->Seek(beginning, STREAM_SEEK_SET, nullptr)), "rewind manifest for Windows schema validation");
     Microsoft::WRL::ComPtr<IAppxManifestReader> reader;
     const auto parsed = factory->CreateManifestReader(stream.Get(), &reader);
     if (FAILED(parsed)) {
@@ -423,11 +578,14 @@ void PackageManifestTests() {
 }
 
 int main(int argc, char** argv) {
+    if (argc == 6 && std::string_view(argv[1]) == "--activation-server")
+        return CrossProcessActivationServer(argv + 2);
     const bool manifestOnly = argc == 2 && std::string_view(argv[1]) == "--manifest-only";
     const bool startupOnly = argc == 2 && std::string_view(argv[1]) == "--startup-only";
     const bool activationOnly = argc == 2 && std::string_view(argv[1]) == "--activation-only";
-    if (argc != 1 && !manifestOnly && !startupOnly && !activationOnly) {
-        std::fprintf(stderr, "Usage: Native.Tests.exe [--manifest-only|--startup-only|--activation-only]\n");
+    const bool clientOnly = argc == 2 && std::string_view(argv[1]) == "--client-lifecycle-only";
+    if (argc != 1 && !manifestOnly && !startupOnly && !activationOnly && !clientOnly) {
+        std::fprintf(stderr, "Usage: Native.Tests.exe [--manifest-only|--startup-only|--activation-only|--client-lifecycle-only]\n");
         return 2;
     }
     const auto initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -436,21 +594,26 @@ int main(int argc, char** argv) {
     {
         ral::ServerLease keepAlive;
         try {
-            if (!manifestOnly && !startupOnly) checks += ActivationTests();
-            if (!manifestOnly && !startupOnly && !activationOnly) {
+            if (!manifestOnly && !startupOnly && !clientOnly) {
+                ProxyTests();
+                checks += ActivationTests();
+                checks += CrossProcessActivationTests();
+            }
+            if (argc == 1 || clientOnly) ClientLifecycleTests();
+            if (!manifestOnly && !startupOnly && !activationOnly && !clientOnly) {
                 ParserTests();
                 AbiTests();
-                ProxyTests();
                 PluginTests();
                 FailureTests();
             }
-            if (!manifestOnly && !activationOnly) PluginStartupTests();
-            if (!startupOnly && !activationOnly) PackageManifestTests();
+            if (!manifestOnly && !activationOnly && !clientOnly) PluginStartupTests();
+            if (!startupOnly && !activationOnly && !clientOnly) PackageManifestTests();
             const auto deadline = GetTickCount64() + 3000;
             while (ral::ServerLeaseCount.load() != 1 && GetTickCount64() < deadline) Sleep(10);
             Check(ral::ServerLeaseCount.load() == 1, "all COM objects and background workers released");
             std::printf("PASS: %u native checks (%s).\n", checks,
-                activationOnly ? "isolated loading modes, both CLSID activation paths and snapshots (no broker pipe)" :
+                clientOnly ? "isolated client lifecycle reporting (no production broker pipe or DVC)" :
+                activationOnly ? "isolated loading modes, COM activation and surface marshaling (test-owned pipes only)" :
                 startupOnly ? "COM executable startup" :
                 manifestOnly ? "package manifest" : "activation, PDU parser, DLL ABI, raw duplex bridge, cancellation, COM lifetime, executable startup, package manifest");
         } catch (const std::exception& error) {

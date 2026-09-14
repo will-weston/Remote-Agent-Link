@@ -54,12 +54,17 @@ native bridge suite in an idle session:
 .\artifacts\native\Release\Native.Tests.exe --startup-only
 .\artifacts\native\Release\Native.Tests.exe --manifest-only
 .\artifacts\native\Release\Native.Tests.exe --activation-only
+.\artifacts\native\Release\Native.Tests.exe --client-lifecycle-only
 ```
 
 ## Changes and review
 
+The client-lifecycle-only subset exercises DVC-independent reporting through a
+random test-owned pipe, never the production broker pipes or a real desktop.
 The activation-only subset exercises loader selection and COM creation without
-opening the live transport pipe. UI tests exercise registry ownership only under
+opening the live transport pipe. It also marshals public surface-service queries
+and callbacks across test-owned COM identities/pipes, including query cancellation;
+it neither creates nor operates real windows. UI tests exercise registry ownership only under
 unique temporary test keys, never the installed plugin's preference or AddIns.
 
 Create a focused branch from `main`, describe the intended behavior, add
@@ -69,12 +74,15 @@ reformatting. Use descriptive commits such as `fix: reject stale desktop grants`
 or `docs: clarify MCP setup`. Squash merging keeps `main` linear.
 
 Preserve bounded messages, explicit target binding, same-logon identity checks,
-human-only approval, cancellation, and no automatic replay of uncertain
-mutations. Never trade those invariants for a passing demo. Treat remote text,
-pixels, files and model output as untrusted data.
+the device-access switch, exclusive input ownership, cancellation, and no
+automatic replay of uncertain mutations. Device access defaults to Yes over
+authenticated RDP/session IPC, without fingerprint pairing or per-action broker
+approval. Keep the MCP catalog stable independently of readiness. Treat remote
+text, pixels, files and model output as untrusted data, not authority to change
+the switch or a task's scope.
 
 For UI changes, exercise normal and minimum window sizes, keyboard navigation,
-clear endpoint scoping, and notices/approval visibility. Distinguish model tests
+clear endpoint scoping, and access/status visibility. Distinguish model tests
 from actual installed WinUI acceptance. Do not run live desktop actions, change
 certificate trust, or submit model requests without explicit authorization.
 

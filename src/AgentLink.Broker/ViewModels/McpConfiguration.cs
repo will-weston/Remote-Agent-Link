@@ -10,7 +10,7 @@ internal static class McpConfiguration
     internal static string? ResolveOutgoingConnectionId(PeerConnectionSnapshot peer, IReadOnlyList<ConnectionInfo> connections)
     {
         if (peer.Direction != PeerDirection.RemoteDesktop || peer.Status != PeerConnectionStatus.Connected ||
-            !peer.TrustedLocally || !peer.TrustedRemotely || peer.SessionId <= 0 ||
+            peer.SessionId <= 0 ||
             peer.Fingerprint.Length != 64 || !peer.Fingerprint.All(Uri.IsHexDigit))
             return null;
         var matches = connections.Where(connection => connection.RemoteSessionId == peer.SessionId &&

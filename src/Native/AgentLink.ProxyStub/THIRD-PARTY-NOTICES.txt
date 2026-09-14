@@ -1,6 +1,8 @@
 IWTSPlugin.idl contains interface definitions adapted from:
 https://github.com/microsoft/SampleOutOfProcRdpPlugin
-Revision edfaf5e (public sample).
+Revision edfaf5ef24c948de784276f5bf8b88dd59c50e50 (public sample).
+Includes the service-provider, window-info and window-change callback contracts.
+SurfaceMetadata.h uses the window-info service GUID from that same public IDL.
 
 MIT License
 

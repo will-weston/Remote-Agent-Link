@@ -6,8 +6,9 @@ namespace ral {
 namespace {
 class ActivationFactory final : public ComObject<IClassFactory, false> {
 public:
-    ActivationFactory(PluginLoadingMode mode, PluginLoadingModeReader reader, void* context) noexcept :
-        mode_(mode), reader_(reader), context_(context) {}
+    ActivationFactory(PluginLoadingMode mode, PluginLoadingModeReader reader, void* context,
+        ClientConnectionPipeResolver resolver) noexcept :
+        mode_(mode), reader_(reader), context_(context), resolver_(resolver) {}
 
     HRESULT STDMETHODCALLTYPE CreateInstance(IUnknown* outer, REFIID iid, void** object) noexcept override {
         ServerLease call;
@@ -20,7 +21,7 @@ public:
             if (FAILED(result)) return result;
             if (result != S_OK || !IsValidLoadingMode(selected))
                 return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
-            return CreatePluginActivation(mode_, selected, iid, object);
+            return CreatePluginActivation(mode_, selected, iid, object, resolver_);
         } catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
         catch (...) { return E_FAIL; }
     }
@@ -51,17 +52,19 @@ private:
     const PluginLoadingMode mode_;
     const PluginLoadingModeReader reader_;
     void* const context_;
+    const ClientConnectionPipeResolver resolver_;
     std::atomic<ULONG> locks_{};
 };
 }
 
 HRESULT CreatePluginClassFactory(REFCLSID clsid, IClassFactory** factory,
-    PluginLoadingModeReader reader, void* context) noexcept {
+    PluginLoadingModeReader reader, void* context, ClientConnectionPipeResolver resolver) noexcept {
     if (!factory) return E_POINTER;
     *factory = nullptr;
     if (clsid != PluginFactoryClsid && clsid != LegacyPluginClsid) return CLASS_E_CLASSNOTAVAILABLE;
     const auto activationMode = clsid == PluginFactoryClsid ? PluginLoadingMode::Modern : PluginLoadingMode::Legacy;
-    *factory = new (std::nothrow) ActivationFactory(activationMode, reader, context);
+    if (!resolver) return E_INVALIDARG;
+    *factory = new (std::nothrow) ActivationFactory(activationMode, reader, context, resolver);
     return *factory ? S_OK : E_OUTOFMEMORY;
 }
 }
